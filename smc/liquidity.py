@@ -1,50 +1,55 @@
+from __future__ import annotations
+
+from typing import Optional
+
+
 class LiquidityEngine:
     """
-    Detects liquidity pools, liquidity zones, and high-quality
-    liquidity sweeps.
+    Causal liquidity engine for Optimus Prime.
 
-    Liquidity types:
-    - Buy-side liquidity (BSL)
-    - Sell-side liquidity (SSL)
-
-    Sources:
-    - Swing highs
-    - Swing lows
+    Detects:
+    - Confirmed swing highs/lows
+    - Buy-side liquidity
+    - Sell-side liquidity
     - Equal highs
     - Equal lows
+    - Clustered liquidity zones
+    - ATR-normalized liquidity sweeps
+    - Quality liquidity sweeps
 
-    Sweep quality considers:
-    - Liquidity penetration
-    - ATR-relative excursion
-    - Candle body size
-    - Wick size
-    - Close location
-    - Rejection strength
-    - Liquidity source count
+    IMPORTANT:
 
-    Important:
-    This is an analysis engine, not a trading signal by itself.
+    A swing at candle N is only known after
+    `swing_length` candles have closed.
+
+    A liquidity level therefore cannot become active
+    before its confirmation candle.
+
+    Equal-liquidity zones are only created after both
+    underlying swings have been confirmed.
+
+    Nearby liquidity levels are clustered so that one
+    market event is not incorrectly counted as several
+    independent liquidity events.
+
+    A sweep is only valid if it occurs strictly AFTER
+    the liquidity zone became known.
+
+    This prevents historical look-ahead bias.
     """
 
     def __init__(
         self,
         swing_length: int = 3,
-        equal_tolerance_pct: float = 0.0005,
-        zone_tolerance_pct: float = 0.001,
+        zone_tolerance_pct: float = 0.0015,
         atr_period: int = 14,
-        max_sweep_atr_multiple: float = 0.75,
-        max_sweep_distance_pct: float = 0.003,
-        min_rejection_ratio: float = 0.20,
-        max_close_distance_atr: float = 1.0,
+        min_penetration_atr: float = 0.10,
+        max_close_distance_atr: float = 1.50,
+        min_rejection_ratio: float = 0.35,
     ):
         if swing_length < 1:
             raise ValueError(
                 "swing_length must be at least 1."
-            )
-
-        if equal_tolerance_pct <= 0:
-            raise ValueError(
-                "equal_tolerance_pct must be greater than 0."
             )
 
         if zone_tolerance_pct <= 0:
@@ -57,19 +62,9 @@ class LiquidityEngine:
                 "atr_period must be at least 1."
             )
 
-        if max_sweep_atr_multiple <= 0:
+        if min_penetration_atr < 0:
             raise ValueError(
-                "max_sweep_atr_multiple must be greater than 0."
-            )
-
-        if max_sweep_distance_pct <= 0:
-            raise ValueError(
-                "max_sweep_distance_pct must be greater than 0."
-            )
-
-        if not 0 <= min_rejection_ratio <= 1:
-            raise ValueError(
-                "min_rejection_ratio must be between 0 and 1."
+                "min_penetration_atr cannot be negative."
             )
 
         if max_close_distance_atr <= 0:
@@ -77,58 +72,54 @@ class LiquidityEngine:
                 "max_close_distance_atr must be greater than 0."
             )
 
+        if not 0 <= min_rejection_ratio <= 1:
+            raise ValueError(
+                "min_rejection_ratio must be between 0 and 1."
+            )
+
         self.swing_length = swing_length
-        self.equal_tolerance_pct = equal_tolerance_pct
         self.zone_tolerance_pct = zone_tolerance_pct
         self.atr_period = atr_period
-        self.max_sweep_atr_multiple = max_sweep_atr_multiple
-        self.max_sweep_distance_pct = max_sweep_distance_pct
-        self.min_rejection_ratio = min_rejection_ratio
+        self.min_penetration_atr = min_penetration_atr
         self.max_close_distance_atr = max_close_distance_atr
+        self.min_rejection_ratio = min_rejection_ratio
 
     # ---------------------------------------------------------
-    # PRICE COMPARISON HELPERS
+    # PRICE TOLERANCE
     # ---------------------------------------------------------
 
-    def _prices_are_equal(
+    def prices_are_similar(
         self,
         price_a: float,
         price_b: float,
     ) -> bool:
         """
-        Check whether two prices are close enough to represent
-        the same liquidity level.
+        Determine whether two prices are close enough
+        to belong to the same liquidity area.
         """
 
-        difference = abs(price_a - price_b)
-        average_price = (price_a + price_b) / 2
-
-        if average_price == 0:
+        if price_a <= 0 or price_b <= 0:
             return False
 
-        difference_pct = difference / average_price
+        difference = abs(
+            price_a - price_b
+        )
 
-        return difference_pct <= self.equal_tolerance_pct
+        average_price = (
+            price_a + price_b
+        ) / 2
 
-    def _price_is_near(
-        self,
-        price_a: float,
-        price_b: float,
-    ) -> bool:
-        """
-        Check whether two prices are close enough to belong
-        to the same liquidity zone.
-        """
-
-        difference = abs(price_a - price_b)
-        average_price = (price_a + price_b) / 2
-
-        if average_price == 0:
+        if average_price <= 0:
             return False
 
-        difference_pct = difference / average_price
+        difference_pct = (
+            difference / average_price
+        )
 
-        return difference_pct <= self.zone_tolerance_pct
+        return (
+            difference_pct
+            <= self.zone_tolerance_pct
+        )
 
     # ---------------------------------------------------------
     # ATR
@@ -137,53 +128,71 @@ class LiquidityEngine:
     def calculate_atr(
         self,
         candles: list[dict],
-    ) -> list[float | None]:
+    ) -> list[Optional[float]]:
         """
-        Calculate a simple Average True Range series.
+        Calculate a simple rolling ATR series.
 
-        ATR is used to normalize sweep size according to
-        current market volatility.
+        ATR at candle N uses only candles up to N.
         """
 
         if not candles:
             return []
 
-        true_ranges = [None] * len(candles)
+        true_ranges: list[float] = []
 
         for i, candle in enumerate(candles):
 
-            high = candle["high"]
-            low = candle["low"]
+            high = float(candle["high"])
+            low = float(candle["low"])
 
             if i == 0:
-                true_ranges[i] = high - low
+                true_ranges.append(
+                    high - low
+                )
                 continue
 
-            previous_close = candles[i - 1]["close"]
+            previous_close = float(
+                candles[i - 1]["close"]
+            )
 
             true_range = max(
                 high - low,
-                abs(high - previous_close),
-                abs(low - previous_close),
+                abs(
+                    high - previous_close
+                ),
+                abs(
+                    low - previous_close
+                ),
             )
 
-            true_ranges[i] = true_range
+            true_ranges.append(
+                true_range
+            )
 
-        atr = [None] * len(candles)
+        atr: list[Optional[float]] = [
+            None
+        ] * len(candles)
 
         for i in range(len(candles)):
 
-            start = i - self.atr_period + 1
+            start = (
+                i - self.atr_period + 1
+            )
 
             if start < 0:
                 continue
 
-            window = true_ranges[start:i + 1]
+            window = true_ranges[
+                start:i + 1
+            ]
 
-            if any(value is None for value in window):
+            if not window:
                 continue
 
-            atr[i] = sum(window) / len(window)
+            atr[i] = (
+                sum(window)
+                / len(window)
+            )
 
         return atr
 
@@ -196,17 +205,33 @@ class LiquidityEngine:
         candles: list[dict],
     ) -> list[dict]:
         """
-        Detect confirmed swing highs and swing lows.
+        Detect confirmed swing highs and lows.
+
+        Swing at N:
+
+            N
+            ↓
+            wait for swing_length candles
+            ↓
+            N + swing_length
+            ↓
+            confirmed
+
+        No swing is considered known before its
+        confirmation candle.
         """
 
-        required = (self.swing_length * 2) + 1
+        required = (
+            self.swing_length * 2
+        ) + 1
 
         if len(candles) < required:
             raise ValueError(
                 f"Need at least {required} candles."
             )
 
-        swings = []
+        swings: list[dict] = []
+
         length = self.swing_length
 
         for i in range(
@@ -216,25 +241,54 @@ class LiquidityEngine:
 
             current = candles[i]
 
-            left = candles[i - length:i]
-            right = candles[i + 1:i + length + 1]
+            left = candles[
+                i - length:i
+            ]
 
-            current_high = current["high"]
-            current_low = current["low"]
+            right = candles[
+                i + 1:i + length + 1
+            ]
+
+            current_high = float(
+                current["high"]
+            )
+
+            current_low = float(
+                current["low"]
+            )
 
             is_swing_high = all(
-                current_high > candle["high"]
-                for candle in left + right
+                current_high
+                > float(candle["high"])
+                for candle in (
+                    left + right
+                )
             )
 
             is_swing_low = all(
-                current_low < candle["low"]
-                for candle in left + right
+                current_low
+                < float(candle["low"])
+                for candle in (
+                    left + right
+                )
             )
 
-            # Ignore ambiguous candles.
-            if is_swing_high and is_swing_low:
+            # A candle that qualifies as both is ignored.
+            if (
+                is_swing_high
+                and is_swing_low
+            ):
                 continue
+
+            confirmation_index = (
+                i + length
+            )
+
+            confirmation_timestamp = (
+                candles[
+                    confirmation_index
+                ]["timestamp"]
+            )
 
             if is_swing_high:
 
@@ -242,7 +296,15 @@ class LiquidityEngine:
                     {
                         "type": "swing_high",
                         "index": i,
-                        "timestamp": current["timestamp"],
+                        "confirmed_at_index": (
+                            confirmation_index
+                        ),
+                        "timestamp": (
+                            current["timestamp"]
+                        ),
+                        "confirmation_timestamp": (
+                            confirmation_timestamp
+                        ),
                         "price": current_high,
                     }
                 )
@@ -253,7 +315,15 @@ class LiquidityEngine:
                     {
                         "type": "swing_low",
                         "index": i,
-                        "timestamp": current["timestamp"],
+                        "confirmed_at_index": (
+                            confirmation_index
+                        ),
+                        "timestamp": (
+                            current["timestamp"]
+                        ),
+                        "confirmation_timestamp": (
+                            confirmation_timestamp
+                        ),
                         "price": current_low,
                     }
                 )
@@ -261,7 +331,7 @@ class LiquidityEngine:
         return swings
 
     # ---------------------------------------------------------
-    # LIQUIDITY LEVELS
+    # SWING LIQUIDITY
     # ---------------------------------------------------------
 
     def find_swing_liquidity(
@@ -269,426 +339,632 @@ class LiquidityEngine:
         candles: list[dict],
     ) -> list[dict]:
         """
-        Convert confirmed swing points into liquidity levels.
+        Convert confirmed swings into liquidity levels.
         """
 
-        swings = self.detect_swings(candles)
+        swings = self.detect_swings(
+            candles
+        )
 
-        liquidity = []
+        liquidity: list[dict] = []
 
         for swing in swings:
 
             if swing["type"] == "swing_high":
 
+                liquidity_type = "buy_side"
+                subtype = "swing_high"
+
+            else:
+
+                liquidity_type = "sell_side"
+                subtype = "swing_low"
+
+            liquidity.append(
+                {
+                    "type": liquidity_type,
+                    "subtype": subtype,
+                    "price": swing["price"],
+                    "index": swing["index"],
+                    "confirmed_at_index": (
+                        swing[
+                            "confirmed_at_index"
+                        ]
+                    ),
+                    "timestamp": (
+                        swing["timestamp"]
+                    ),
+                    "confirmation_timestamp": (
+                        swing[
+                            "confirmation_timestamp"
+                        ]
+                    ),
+                    "source": "swing",
+                }
+            )
+
+        return liquidity
+
+    # ---------------------------------------------------------
+    # EQUAL LIQUIDITY
+    # ---------------------------------------------------------
+
+    def find_equal_liquidity(
+        self,
+        candles: list[dict],
+    ) -> list[dict]:
+        """
+        Detect equal highs and equal lows.
+
+        The second swing must already be confirmed before
+        the equal-liquidity zone becomes active.
+
+        This prevents future information from creating
+        historical liquidity.
+        """
+
+        swings = self.detect_swings(
+            candles
+        )
+
+        highs = [
+            swing
+            for swing in swings
+            if swing["type"]
+            == "swing_high"
+        ]
+
+        lows = [
+            swing
+            for swing in swings
+            if swing["type"]
+            == "swing_low"
+        ]
+
+        liquidity: list[dict] = []
+
+        # -----------------------------------------------------
+        # Equal highs = buy-side liquidity
+        # -----------------------------------------------------
+
+        for i in range(len(highs)):
+
+            for j in range(
+                i + 1,
+                len(highs),
+            ):
+
+                first = highs[i]
+                second = highs[j]
+
+                if not self.prices_are_similar(
+                    first["price"],
+                    second["price"],
+                ):
+                    continue
+
+                confirmation_index = max(
+                    first[
+                        "confirmed_at_index"
+                    ],
+                    second[
+                        "confirmed_at_index"
+                    ],
+                )
+
+                confirmation_timestamp = (
+                    candles[
+                        confirmation_index
+                    ]["timestamp"]
+                )
+
+                average_price = (
+                    first["price"]
+                    + second["price"]
+                ) / 2
+
                 liquidity.append(
                     {
                         "type": "buy_side",
-                        "subtype": "swing_high",
-                        "price": swing["price"],
-                        "index": swing["index"],
-                        "timestamp": swing["timestamp"],
-                        "source": "swing",
+                        "subtype": "equal_high",
+                        "price": average_price,
+                        "index": second[
+                            "index"
+                        ],
+                        "confirmed_at_index": (
+                            confirmation_index
+                        ),
+                        "timestamp": (
+                            second["timestamp"]
+                        ),
+                        "confirmation_timestamp": (
+                            confirmation_timestamp
+                        ),
+                        "source": "equal_high",
+                        "sources": 2,
+                        "source_indices": [
+                            first["index"],
+                            second["index"],
+                        ],
                     }
                 )
 
-            else:
+        # -----------------------------------------------------
+        # Equal lows = sell-side liquidity
+        # -----------------------------------------------------
+
+        for i in range(len(lows)):
+
+            for j in range(
+                i + 1,
+                len(lows),
+            ):
+
+                first = lows[i]
+                second = lows[j]
+
+                if not self.prices_are_similar(
+                    first["price"],
+                    second["price"],
+                ):
+                    continue
+
+                confirmation_index = max(
+                    first[
+                        "confirmed_at_index"
+                    ],
+                    second[
+                        "confirmed_at_index"
+                    ],
+                )
+
+                confirmation_timestamp = (
+                    candles[
+                        confirmation_index
+                    ]["timestamp"]
+                )
+
+                average_price = (
+                    first["price"]
+                    + second["price"]
+                ) / 2
 
                 liquidity.append(
                     {
                         "type": "sell_side",
-                        "subtype": "swing_low",
-                        "price": swing["price"],
-                        "index": swing["index"],
-                        "timestamp": swing["timestamp"],
-                        "source": "swing",
+                        "subtype": "equal_low",
+                        "price": average_price,
+                        "index": second[
+                            "index"
+                        ],
+                        "confirmed_at_index": (
+                            confirmation_index
+                        ),
+                        "timestamp": (
+                            second["timestamp"]
+                        ),
+                        "confirmation_timestamp": (
+                            confirmation_timestamp
+                        ),
+                        "source": "equal_low",
+                        "sources": 2,
+                        "source_indices": [
+                            first["index"],
+                            second["index"],
+                        ],
                     }
                 )
 
         return liquidity
 
-    def find_equal_highs(
+    # ---------------------------------------------------------
+    # LIQUIDITY CLUSTERING
+    # ---------------------------------------------------------
+
+    def cluster_liquidity(
         self,
-        candles: list[dict],
+        levels: list[dict],
     ) -> list[dict]:
         """
-        Detect consecutive swing highs that form equal-high
-        liquidity.
+        Merge nearby liquidity levels into meaningful zones.
+
+        Only liquidity from the same side is clustered.
+
+        Example:
+
+            buy-side 100.00
+            buy-side 100.08
+            buy-side 100.12
+
+        becomes:
+
+            buy-side liquidity cluster ≈ 100.07
+
+        The cluster retains information about the original
+        liquidity sources.
+
+        IMPORTANT:
+
+        The cluster confirmation time is the latest
+        confirmation time among its members.
+
+        Therefore the cluster cannot become available
+        before all information used to construct it
+        was actually known.
         """
 
-        swings = self.detect_swings(candles)
+        if not levels:
+            return []
 
-        highs = [
-            swing
-            for swing in swings
-            if swing["type"] == "swing_high"
-        ]
+        sorted_levels = sorted(
+            levels,
+            key=lambda level: (
+                level[
+                    "confirmed_at_index"
+                ],
+                level["index"],
+            ),
+        )
 
-        equal_highs = []
+        clusters: list[list[dict]] = []
 
-        for i in range(len(highs) - 1):
+        for level in sorted_levels:
 
-            first = highs[i]
-            second = highs[i + 1]
+            placed = False
 
-            if self._prices_are_equal(
-                first["price"],
-                second["price"],
-            ):
+            for cluster in clusters:
 
-                average_price = (
-                    first["price"] + second["price"]
-                ) / 2
+                # Never combine buy-side and sell-side
+                # liquidity.
+                if (
+                    cluster[0]["type"]
+                    != level["type"]
+                ):
+                    continue
 
-                equal_highs.append(
-                    {
-                        "type": "buy_side",
-                        "subtype": "equal_high",
-                        "price": average_price,
-                        "index": second["index"],
-                        "timestamp": second["timestamp"],
-                        "source": "equal_high",
-                        "source_indices": [
-                            first["index"],
-                            second["index"],
-                        ],
-                    }
+                cluster_prices = [
+                    float(item["price"])
+                    for item in cluster
+                ]
+
+                cluster_average = (
+                    sum(cluster_prices)
+                    / len(cluster_prices)
                 )
 
-        return equal_highs
+                if self.prices_are_similar(
+                    cluster_average,
+                    float(level["price"]),
+                ):
 
-    def find_equal_lows(
-        self,
-        candles: list[dict],
-    ) -> list[dict]:
-        """
-        Detect consecutive swing lows that form equal-low
-        liquidity.
-        """
+                    cluster.append(
+                        level
+                    )
 
-        swings = self.detect_swings(candles)
+                    placed = True
+                    break
 
-        lows = [
-            swing
-            for swing in swings
-            if swing["type"] == "swing_low"
-        ]
+            if not placed:
 
-        equal_lows = []
-
-        for i in range(len(lows) - 1):
-
-            first = lows[i]
-            second = lows[i + 1]
-
-            if self._prices_are_equal(
-                first["price"],
-                second["price"],
-            ):
-
-                average_price = (
-                    first["price"] + second["price"]
-                ) / 2
-
-                equal_lows.append(
-                    {
-                        "type": "sell_side",
-                        "subtype": "equal_low",
-                        "price": average_price,
-                        "index": second["index"],
-                        "timestamp": second["timestamp"],
-                        "source": "equal_low",
-                        "source_indices": [
-                            first["index"],
-                            second["index"],
-                        ],
-                    }
+                clusters.append(
+                    [level]
                 )
 
-        return equal_lows
+        clustered: list[dict] = []
+
+        for cluster in clusters:
+
+            prices = [
+                float(level["price"])
+                for level in cluster
+            ]
+
+            average_price = (
+                sum(prices)
+                / len(prices)
+            )
+
+            latest_confirmation = max(
+                level[
+                    "confirmed_at_index"
+                ]
+                for level in cluster
+            )
+
+            latest_level = max(
+                cluster,
+                key=lambda level: (
+                    level[
+                        "confirmed_at_index"
+                    ],
+                    level["index"],
+                ),
+            )
+
+            source_indices: list[int] = []
+
+            for level in cluster:
+
+                if (
+                    "source_indices"
+                    in level
+                ):
+
+                    source_indices.extend(
+                        level[
+                            "source_indices"
+                        ]
+                    )
+
+                else:
+
+                    source_indices.append(
+                        level["index"]
+                    )
+
+            source_indices = sorted(
+                set(source_indices)
+            )
+
+            source_types = sorted(
+                set(
+                    level["source"]
+                    for level in cluster
+                )
+            )
+
+            source_subtypes = sorted(
+                set(
+                    level["subtype"]
+                    for level in cluster
+                )
+            )
+
+            clustered.append(
+                {
+                    "type": cluster[0]["type"],
+                    "subtype": (
+                        "liquidity_cluster"
+                    ),
+                    "price": average_price,
+
+                    # Representative index.
+                    "index": max(
+                        level["index"]
+                        for level in cluster
+                    ),
+
+                    # CRITICAL CAUSALITY RULE:
+                    # The cluster only exists after
+                    # every source level is confirmed.
+                    "confirmed_at_index": (
+                        latest_confirmation
+                    ),
+
+                    "timestamp": (
+                        latest_level[
+                            "timestamp"
+                        ]
+                    ),
+
+                    "confirmation_timestamp": (
+                        latest_level[
+                            "confirmation_timestamp"
+                        ]
+                    ),
+
+                    "source": "cluster",
+
+                    "sources": len(cluster),
+
+                    "source_types": (
+                        source_types
+                    ),
+
+                    "source_subtypes": (
+                        source_subtypes
+                    ),
+
+                    "source_indices": (
+                        source_indices
+                    ),
+                }
+            )
+
+        clustered.sort(
+            key=lambda level: (
+                level[
+                    "confirmed_at_index"
+                ],
+                level["index"],
+            )
+        )
+
+        return clustered
+
+    # ---------------------------------------------------------
+    # ALL LIQUIDITY
+    # ---------------------------------------------------------
 
     def find_all_liquidity(
         self,
         candles: list[dict],
     ) -> list[dict]:
         """
-        Return all detected liquidity levels.
+        Detect raw liquidity and convert it into
+        clustered liquidity zones.
         """
 
-        liquidity = []
-
-        liquidity.extend(
-            self.find_swing_liquidity(candles)
+        swing_levels = (
+            self.find_swing_liquidity(
+                candles
+            )
         )
 
-        liquidity.extend(
-            self.find_equal_highs(candles)
+        equal_levels = (
+            self.find_equal_liquidity(
+                candles
+            )
         )
 
-        liquidity.extend(
-            self.find_equal_lows(candles)
+        raw_levels = (
+            swing_levels
+            + equal_levels
         )
 
-        liquidity.sort(
-            key=lambda level: level["index"]
+        return self.cluster_liquidity(
+            raw_levels
         )
-
-        return liquidity
 
     # ---------------------------------------------------------
-    # LIQUIDITY ZONES
+    # SWEEP METRICS
     # ---------------------------------------------------------
 
-    def cluster_liquidity(
+    def calculate_sweep_metrics(
         self,
-        liquidity_levels: list[dict],
-    ) -> list[dict]:
+        candle: dict,
+        liquidity: dict,
+        atr: Optional[float],
+    ) -> Optional[dict]:
         """
-        Group nearby liquidity levels into liquidity zones.
+        Calculate penetration, close distance and rejection
+        metrics for a potential liquidity sweep.
         """
 
-        if not liquidity_levels:
-            return []
+        if atr is None or atr <= 0:
+            return None
 
-        sorted_levels = sorted(
-            liquidity_levels,
-            key=lambda level: (
-                level["type"],
-                level["price"],
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
+        close = float(
+            candle["close"]
+        )
+
+        open_price = float(
+            candle["open"]
+        )
+
+        liquidity_price = float(
+            liquidity["price"]
+        )
+
+        liquidity_type = (
+            liquidity["type"]
+        )
+
+        candle_range = (
+            high - low
+        )
+
+        if candle_range <= 0:
+            return None
+
+        # -----------------------------------------------------
+        # Buy-side liquidity
+        # -----------------------------------------------------
+
+        if liquidity_type == "buy_side":
+
+            penetration = (
+                high
+                - liquidity_price
+            )
+
+            if penetration <= 0:
+                return None
+
+            close_distance = abs(
+                close
+                - liquidity_price
+            )
+
+            rejection_distance = max(
+                high - close,
+                0.0,
+            )
+
+            direction = "bearish"
+
+        # -----------------------------------------------------
+        # Sell-side liquidity
+        # -----------------------------------------------------
+
+        elif liquidity_type == "sell_side":
+
+            penetration = (
+                liquidity_price
+                - low
+            )
+
+            if penetration <= 0:
+                return None
+
+            close_distance = abs(
+                close
+                - liquidity_price
+            )
+
+            rejection_distance = max(
+                close - low,
+                0.0,
+            )
+
+            direction = "bullish"
+
+        else:
+            return None
+
+        penetration_pct = (
+            penetration
+            / liquidity_price
+            if liquidity_price > 0
+            else 0.0
+        )
+
+        penetration_atr = (
+            penetration
+            / atr
+        )
+
+        close_distance_atr = (
+            close_distance
+            / atr
+        )
+
+        rejection_ratio = (
+            rejection_distance
+            / candle_range
+        )
+
+        return {
+            "penetration": penetration,
+            "penetration_pct": (
+                penetration_pct
             ),
-        )
-
-        zones = []
-
-        for level in sorted_levels:
-
-            matching_zone = None
-
-            for zone in zones:
-
-                if zone["type"] != level["type"]:
-                    continue
-
-                if self._price_is_near(
-                    zone["price"],
-                    level["price"],
-                ):
-                    matching_zone = zone
-                    break
-
-            if matching_zone is None:
-
-                zones.append(
-                    {
-                        "type": level["type"],
-                        "price": level["price"],
-                        "high": level["price"],
-                        "low": level["price"],
-                        "index": level["index"],
-                        "timestamp": level["timestamp"],
-                        "sources": [level],
-                    }
-                )
-
-            else:
-
-                matching_zone["sources"].append(level)
-
-                prices = [
-                    source["price"]
-                    for source in matching_zone["sources"]
-                ]
-
-                matching_zone["price"] = (
-                    sum(prices) / len(prices)
-                )
-
-                matching_zone["high"] = max(prices)
-                matching_zone["low"] = min(prices)
-
-                matching_zone["index"] = max(
-                    source["index"]
-                    for source in matching_zone["sources"]
-                )
-
-        zones.sort(
-            key=lambda zone: zone["index"]
-        )
-
-        return zones
-
-    # ---------------------------------------------------------
-    # SWEEP QUALITY
-    # ---------------------------------------------------------
-
-    def _evaluate_buy_side_sweep(
-        self,
-        candle: dict,
-        zone: dict,
-        atr: float | None,
-    ) -> dict | None:
-        """
-        Evaluate a potential buy-side liquidity sweep.
-
-        A valid bearish sweep requires:
-
-        1. High penetrates the zone.
-        2. Close returns below the liquidity zone.
-        3. Excursion beyond the zone is not excessive.
-        4. Close is not excessively far from the zone.
-        5. The candle demonstrates rejection.
-        """
-
-        zone_high = zone["high"]
-        zone_low = zone["low"]
-
-        candle_high = candle["high"]
-        candle_low = candle["low"]
-        candle_close = candle["close"]
-        candle_open = candle["open"]
-
-        if candle_high <= zone_high:
-            return None
-
-        if candle_close >= zone_low:
-            return None
-
-        penetration = candle_high - zone_high
-
-        if zone_high <= 0:
-            return None
-
-        penetration_pct = penetration / zone_high
-
-        if penetration_pct > self.max_sweep_distance_pct:
-            return None
-
-        # ATR filter.
-        if atr is not None and penetration > (
-            atr * self.max_sweep_atr_multiple
-        ):
-            return None
-
-        candle_range = candle_high - candle_low
-
-        if candle_range <= 0:
-            return None
-
-        upper_wick = candle_high - max(
-            candle_open,
-            candle_close,
-        )
-
-        rejection_ratio = upper_wick / candle_range
-
-        if rejection_ratio < self.min_rejection_ratio:
-            return None
-
-        # How far did the close travel below the zone?
-        close_distance = zone_low - candle_close
-
-        if atr is not None:
-            close_distance_atr = close_distance / atr
-
-            if close_distance_atr > self.max_close_distance_atr:
-                return None
-        else:
-            close_distance_atr = None
-
-        return {
-            "type": "buy_side_sweep",
-            "direction": "bearish",
-            "penetration": penetration,
-            "penetration_pct": penetration_pct,
-            "close_distance": close_distance,
-            "close_distance_atr": close_distance_atr,
-            "rejection_ratio": rejection_ratio,
-            "candle_range": candle_range,
+            "penetration_atr": (
+                penetration_atr
+            ),
+            "close_distance": (
+                close_distance
+            ),
+            "close_distance_atr": (
+                close_distance_atr
+            ),
+            "rejection_ratio": (
+                rejection_ratio
+            ),
             "atr": atr,
-        }
-
-    def _evaluate_sell_side_sweep(
-        self,
-        candle: dict,
-        zone: dict,
-        atr: float | None,
-    ) -> dict | None:
-        """
-        Evaluate a potential sell-side liquidity sweep.
-
-        A valid bullish sweep requires:
-
-        1. Low penetrates the zone.
-        2. Close returns above the liquidity zone.
-        3. Excursion beyond the zone is not excessive.
-        4. Close is not excessively far from the zone.
-        5. The candle demonstrates rejection.
-        """
-
-        zone_high = zone["high"]
-        zone_low = zone["low"]
-
-        candle_high = candle["high"]
-        candle_low = candle["low"]
-        candle_close = candle["close"]
-        candle_open = candle["open"]
-
-        if candle_low >= zone_low:
-            return None
-
-        if candle_close <= zone_high:
-            return None
-
-        penetration = zone_low - candle_low
-
-        if zone_low <= 0:
-            return None
-
-        penetration_pct = penetration / zone_low
-
-        if penetration_pct > self.max_sweep_distance_pct:
-            return None
-
-        # ATR filter.
-        if atr is not None and penetration > (
-            atr * self.max_sweep_atr_multiple
-        ):
-            return None
-
-        candle_range = candle_high - candle_low
-
-        if candle_range <= 0:
-            return None
-
-        lower_wick = min(
-            candle_open,
-            candle_close,
-        ) - candle_low
-
-        rejection_ratio = lower_wick / candle_range
-
-        if rejection_ratio < self.min_rejection_ratio:
-            return None
-
-        close_distance = candle_close - zone_high
-
-        if atr is not None:
-            close_distance_atr = close_distance / atr
-
-            if close_distance_atr > self.max_close_distance_atr:
-                return None
-        else:
-            close_distance_atr = None
-
-        return {
-            "type": "sell_side_sweep",
-            "direction": "bullish",
-            "penetration": penetration,
-            "penetration_pct": penetration_pct,
-            "close_distance": close_distance,
-            "close_distance_atr": close_distance_atr,
-            "rejection_ratio": rejection_ratio,
-            "candle_range": candle_range,
-            "atr": atr,
+            "direction": direction,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
         }
 
     # ---------------------------------------------------------
@@ -698,90 +974,263 @@ class LiquidityEngine:
     def detect_sweeps(
         self,
         candles: list[dict],
-        liquidity_levels: list[dict] | None = None,
+        liquidity_levels: Optional[list[dict]] = None,
     ) -> list[dict]:
         """
-        Detect high-quality liquidity sweeps.
+        Detect liquidity sweeps.
 
-        Buy-side sweep:
-            Price trades above buy-side liquidity,
-            rejects, and closes back below the zone.
+        A liquidity zone cannot be swept on the same candle
+        that confirms it.
 
-        Sell-side sweep:
-            Price trades below sell-side liquidity,
-            rejects, and closes back above the zone.
+        The sweep must occur strictly AFTER confirmation.
 
-        Sweep quality is normalized using ATR where available.
+        Each clustered liquidity zone can only be consumed
+        once by the first valid sweep.
         """
 
+        if not candles:
+            return []
+
         if liquidity_levels is None:
-            liquidity_levels = self.find_all_liquidity(
-                candles
+
+            liquidity_levels = (
+                self.find_all_liquidity(
+                    candles
+                )
             )
 
-        zones = self.cluster_liquidity(
-            liquidity_levels
+        atr_series = (
+            self.calculate_atr(
+                candles
+            )
         )
 
-        atr_values = self.calculate_atr(candles)
+        sweeps: list[dict] = []
 
-        sweeps = []
+        # Each cluster can only produce one
+        # first valid sweep.
+        consumed: set[tuple] = set()
 
-        for zone in zones:
+        for candle_index, candle in enumerate(
+            candles
+        ):
 
-            zone_index = zone["index"]
+            atr = atr_series[
+                candle_index
+            ]
 
-            for candle_index in range(
-                zone_index + 1,
-                len(candles),
+            if atr is None or atr <= 0:
+                continue
+
+            for liquidity in (
+                liquidity_levels
             ):
 
-                candle = candles[candle_index]
-
-                atr = atr_values[candle_index]
-
-                result = None
-
-                if zone["type"] == "buy_side":
-
-                    result = self._evaluate_buy_side_sweep(
-                        candle,
-                        zone,
-                        atr,
-                    )
-
-                elif zone["type"] == "sell_side":
-
-                    result = self._evaluate_sell_side_sweep(
-                        candle,
-                        zone,
-                        atr,
-                    )
-
-                if result is None:
-                    continue
-
-                sweeps.append(
-                    {
-                        **result,
-                        "candle_index": candle_index,
-                        "timestamp": candle["timestamp"],
-                        "price": candle["close"],
-                        "liquidity_price": zone["price"],
-                        "liquidity_high": zone["high"],
-                        "liquidity_low": zone["low"],
-                        "liquidity_index": zone_index,
-                        "liquidity_sources": len(
-                            zone["sources"]
-                        ),
-                    }
+                confirmation_index = (
+                    liquidity[
+                        "confirmed_at_index"
+                    ]
                 )
 
-                # First valid sweep consumes this zone.
-                break
+                # CRITICAL CAUSALITY RULE:
+                #
+                # The liquidity must have been
+                # confirmed BEFORE the sweep candle.
+                #
+                # Same-candle confirmation is not allowed.
+                if (
+                    candle_index
+                    <= confirmation_index
+                ):
+                    continue
+
+                zone_key = (
+                    liquidity["type"],
+                    liquidity["subtype"],
+                    liquidity["index"],
+                    round(
+                        float(
+                            liquidity["price"]
+                        ),
+                        8,
+                    ),
+                    tuple(
+                        liquidity.get(
+                            "source_indices",
+                            [],
+                        )
+                    ),
+                )
+
+                if zone_key in consumed:
+                    continue
+
+                metrics = (
+                    self.calculate_sweep_metrics(
+                        candle,
+                        liquidity,
+                        atr,
+                    )
+                )
+
+                if metrics is None:
+                    continue
+
+                if (
+                    metrics[
+                        "penetration_atr"
+                    ]
+                    < self.min_penetration_atr
+                ):
+                    continue
+
+                if (
+                    metrics[
+                        "close_distance_atr"
+                    ]
+                    > self.max_close_distance_atr
+                ):
+                    continue
+
+                if (
+                    metrics[
+                        "rejection_ratio"
+                    ]
+                    < self.min_rejection_ratio
+                ):
+                    continue
+
+                sweep = {
+                    "type": (
+                        f'{liquidity["type"]}'
+                        "_sweep"
+                    ),
+
+                    "direction": (
+                        metrics[
+                            "direction"
+                        ]
+                    ),
+
+                    "candle_index": (
+                        candle_index
+                    ),
+
+                    "timestamp": (
+                        candle["timestamp"]
+                    ),
+
+                    "price": (
+                        candle["close"]
+                    ),
+
+                    "liquidity_index": (
+                        liquidity["index"]
+                    ),
+
+                    "liquidity_price": (
+                        liquidity["price"]
+                    ),
+
+                    "liquidity_type": (
+                        liquidity["type"]
+                    ),
+
+                    "liquidity_subtype": (
+                        liquidity["subtype"]
+                    ),
+
+                    "liquidity_source": (
+                        liquidity["source"]
+                    ),
+
+                    "liquidity_confirmed_at_index": (
+                        confirmation_index
+                    ),
+
+                    "liquidity_confirmation_timestamp": (
+                        liquidity[
+                            "confirmation_timestamp"
+                        ]
+                    ),
+
+                    **metrics,
+                }
+
+                # Preserve cluster metadata.
+                if "sources" in liquidity:
+
+                    sweep["sources"] = (
+                        liquidity[
+                            "sources"
+                        ]
+                    )
+
+                if "source_types" in liquidity:
+
+                    sweep["source_types"] = (
+                        liquidity[
+                            "source_types"
+                        ]
+                    )
+
+                if "source_subtypes" in liquidity:
+
+                    sweep["source_subtypes"] = (
+                        liquidity[
+                            "source_subtypes"
+                        ]
+                    )
+
+                if "source_indices" in liquidity:
+
+                    sweep["source_indices"] = (
+                        liquidity[
+                            "source_indices"
+                        ]
+                    )
+
+                sweeps.append(
+                    sweep
+                )
+
+                # First valid sweep consumes
+                # the entire liquidity cluster.
+                consumed.add(
+                    zone_key
+                )
 
         sweeps.sort(
-            key=lambda sweep: sweep["candle_index"]
+            key=lambda sweep: (
+                sweep[
+                    "candle_index"
+                ],
+                sweep[
+                    "liquidity_type"
+                ],
+                sweep[
+                    "liquidity_price"
+                ],
+            )
         )
 
         return sweeps
+
+    # ---------------------------------------------------------
+    # QUALITY SWEEPS
+    # ---------------------------------------------------------
+
+    def find_quality_sweeps(
+        self,
+        candles: list[dict],
+        liquidity_levels: Optional[list[dict]] = None,
+    ) -> list[dict]:
+        """
+        Return sweeps satisfying the configured
+        quality filters.
+        """
+
+        return self.detect_sweeps(
+            candles,
+            liquidity_levels,
+        )
