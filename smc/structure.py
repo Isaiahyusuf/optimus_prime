@@ -1,0 +1,270 @@
+class MarketStructure:
+    """
+    Detects confirmed swing points and market structure
+    from OHLCV candle data.
+
+    The engine provides:
+    - Swing highs / lows
+    - HH / HL / LH / LL classification
+    - BOS (Break of Structure)
+    - MSS (Market Structure Shift)
+    """
+
+    def __init__(self, swing_length: int = 3):
+        if swing_length < 1:
+            raise ValueError("swing_length must be at least 1.")
+
+        self.swing_length = swing_length
+
+    def detect_swings(self, candles: list[dict]) -> list[dict]:
+        """
+        Detect confirmed swing highs and swing lows.
+
+        A swing requires `swing_length` candles on both sides.
+
+        If the same candle qualifies as both a swing high and
+        swing low, it is treated as an ambiguous candle and
+        ignored for structural purposes.
+        """
+
+        required = (self.swing_length * 2) + 1
+
+        if len(candles) < required:
+            raise ValueError(
+                f"Need at least {required} candles."
+            )
+
+        swings = []
+        length = self.swing_length
+
+        for i in range(length, len(candles) - length):
+
+            current = candles[i]
+
+            left = candles[i - length:i]
+            right = candles[i + 1:i + length + 1]
+
+            current_high = current["high"]
+            current_low = current["low"]
+
+            is_swing_high = all(
+                current_high > candle["high"]
+                for candle in left + right
+            )
+
+            is_swing_low = all(
+                current_low < candle["low"]
+                for candle in left + right
+            )
+
+            # Ignore ambiguous candles that qualify as both.
+            if is_swing_high and is_swing_low:
+                continue
+
+            if is_swing_high:
+                swings.append(
+                    {
+                        "type": "swing_high",
+                        "index": i,
+                        "timestamp": current["timestamp"],
+                        "price": current_high,
+                    }
+                )
+
+            elif is_swing_low:
+                swings.append(
+                    {
+                        "type": "swing_low",
+                        "index": i,
+                        "timestamp": current["timestamp"],
+                        "price": current_low,
+                    }
+                )
+
+        return swings
+
+    def classify_structure(
+        self,
+        candles: list[dict],
+    ) -> list[dict]:
+        """
+        Classify confirmed swings as:
+
+        Highs:
+            HH = Higher High
+            LH = Lower High
+
+        Lows:
+            HL = Higher Low
+            LL = Lower Low
+        """
+
+        swings = self.detect_swings(candles)
+
+        previous_high = None
+        previous_low = None
+
+        structure = []
+
+        for swing in swings:
+
+            if swing["type"] == "swing_high":
+
+                if previous_high is None:
+                    label = "SH"
+                elif swing["price"] > previous_high:
+                    label = "HH"
+                else:
+                    label = "LH"
+
+                previous_high = swing["price"]
+
+            else:
+
+                if previous_low is None:
+                    label = "SL"
+                elif swing["price"] > previous_low:
+                    label = "HL"
+                else:
+                    label = "LL"
+
+                previous_low = swing["price"]
+
+            structure.append(
+                {
+                    **swing,
+                    "label": label,
+                }
+            )
+
+        return structure
+
+    def detect_breaks(
+        self,
+        candles: list[dict],
+    ) -> list[dict]:
+        """
+        Detect meaningful BOS and MSS events.
+
+        Rules:
+
+        1. Only confirmed swings can become structural levels.
+        2. A level can only be broken once.
+        3. The break must happen with a candle CLOSE.
+        4. Only the most recent relevant swing high/low is
+           considered the active structural level.
+        5. The first directional break is MSS.
+        6. Subsequent breaks in the same direction are BOS.
+        7. A break in the opposite direction creates MSS.
+        """
+
+        structure = self.classify_structure(candles)
+
+        if not structure:
+            return []
+
+        breaks = []
+
+        bias = None
+
+        active_high = None
+        active_low = None
+
+        broken_high_indices = set()
+        broken_low_indices = set()
+
+        # Process candles chronologically.
+        for candle_index, candle in enumerate(candles):
+
+            close = candle["close"]
+
+            # -------------------------------------------------
+            # Update active structural levels.
+            #
+            # A swing only becomes usable after it has been
+            # confirmed, so it must occur before this candle.
+            # -------------------------------------------------
+
+            confirmed_swings = [
+                swing
+                for swing in structure
+                if swing["index"] < candle_index
+            ]
+
+            for swing in confirmed_swings:
+
+                if swing["type"] == "swing_high":
+                    active_high = swing
+
+                elif swing["type"] == "swing_low":
+                    active_low = swing
+
+            # -------------------------------------------------
+            # Bullish break
+            # -------------------------------------------------
+
+            if (
+                active_high is not None
+                and active_high["index"] not in broken_high_indices
+                and close > active_high["price"]
+            ):
+
+                if bias == "bullish":
+                    event_type = "BOS"
+                else:
+                    event_type = "MSS"
+
+                breaks.append(
+                    {
+                        "type": event_type,
+                        "direction": "bullish",
+                        "candle_index": candle_index,
+                        "timestamp": candle["timestamp"],
+                        "price": close,
+                        "broken_level": active_high["price"],
+                        "broken_swing_index": active_high["index"],
+                    }
+                )
+
+                broken_high_indices.add(active_high["index"])
+
+                bias = "bullish"
+
+                # Remove the broken level from consideration.
+                active_high = None
+
+            # -------------------------------------------------
+            # Bearish break
+            # -------------------------------------------------
+
+            if (
+                active_low is not None
+                and active_low["index"] not in broken_low_indices
+                and close < active_low["price"]
+            ):
+
+                if bias == "bearish":
+                    event_type = "BOS"
+                else:
+                    event_type = "MSS"
+
+                breaks.append(
+                    {
+                        "type": event_type,
+                        "direction": "bearish",
+                        "candle_index": candle_index,
+                        "timestamp": candle["timestamp"],
+                        "price": close,
+                        "broken_level": active_low["price"],
+                        "broken_swing_index": active_low["index"],
+                    }
+                )
+
+                broken_low_indices.add(active_low["index"])
+
+                bias = "bearish"
+
+                # Remove the broken level from consideration.
+                active_low = None
+
+        return breaks
