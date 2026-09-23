@@ -12,14 +12,10 @@ class FairValueGapEngine:
         min_quality_score: int = 60,
     ):
         if min_gap_pct < 0:
-            raise ValueError(
-                "min_gap_pct cannot be negative."
-            )
+            raise ValueError("min_gap_pct cannot be negative.")
 
         if max_gap_pct <= 0:
-            raise ValueError(
-                "max_gap_pct must be greater than zero."
-            )
+            raise ValueError("max_gap_pct must be greater than zero.")
 
         if min_gap_pct > max_gap_pct:
             raise ValueError(
@@ -45,6 +41,9 @@ class FairValueGapEngine:
     ) -> list[dict]:
         """
         Detect raw FVGs from completed candles.
+
+        An FVG becomes known only when its third candle
+        has closed.
         """
 
         if len(candles) < 3:
@@ -140,22 +139,43 @@ class FairValueGapEngine:
         self,
         fvg: dict,
         candles: list[dict],
+        evaluation_index: int | None = None,
     ) -> dict:
         """
-        Track how price interacts with an FVG after creation.
+        Track FVG lifecycle using only information available
+        at evaluation_index.
+
+        This prevents future candles from affecting historical
+        FVG state.
         """
 
         updated = dict(fvg)
 
         creation_index = fvg["created_at_index"]
 
+        if creation_index >= len(candles):
+            raise ValueError(
+                "FVG creation index exceeds candle data."
+            )
+
+        if evaluation_index is None:
+            evaluation_index = len(candles) - 1
+
+        if evaluation_index < creation_index:
+            raise ValueError(
+                "evaluation_index cannot be before FVG creation."
+            )
+
+        evaluation_index = min(
+            evaluation_index,
+            len(candles) - 1,
+        )
+
         gap_low = fvg["gap_low"]
         gap_high = fvg["gap_high"]
-
         gap_size = gap_high - gap_low
 
         status = "active"
-
         max_fill = 0.0
 
         mitigation_index = None
@@ -166,7 +186,7 @@ class FairValueGapEngine:
 
         for i in range(
             creation_index + 1,
-            len(candles),
+            evaluation_index + 1,
         ):
 
             candle = candles[i]
@@ -263,24 +283,15 @@ class FairValueGapEngine:
                 status = "partially_mitigated"
 
         updated["status"] = status
-
         updated["max_fill_percentage"] = max_fill
 
-        updated["mitigation_index"] = (
-            mitigation_index
-        )
+        updated["mitigation_index"] = mitigation_index
+        updated["mitigation_timestamp"] = mitigation_timestamp
 
-        updated["mitigation_timestamp"] = (
-            mitigation_timestamp
-        )
+        updated["invalidation_index"] = invalidation_index
+        updated["invalidation_timestamp"] = invalidation_timestamp
 
-        updated["invalidation_index"] = (
-            invalidation_index
-        )
-
-        updated["invalidation_timestamp"] = (
-            invalidation_timestamp
-        )
+        updated["evaluation_index"] = evaluation_index
 
         return updated
 
@@ -292,9 +303,6 @@ class FairValueGapEngine:
         self,
         candle: dict,
     ) -> float:
-        """
-        Measures candle body relative to total range.
-        """
 
         candle_range = (
             candle["high"] - candle["low"]
@@ -313,12 +321,6 @@ class FairValueGapEngine:
         self,
         candle: dict,
     ) -> float:
-        """
-        Measures where the close sits inside the candle.
-
-        1.0 = close at high
-        0.0 = close at low
-        """
 
         candle_range = (
             candle["high"] - candle["low"]
@@ -339,32 +341,17 @@ class FairValueGapEngine:
         self,
         fvg: dict,
         candles: list[dict],
+        evaluation_index: int | None = None,
     ) -> dict:
         """
-        Evaluate the structural quality of an FVG.
-
-        This is a quality assessment only.
-        It does NOT produce a trading signal.
-
-        Score components:
-
-            Gap size       = 25 points
-            Candle quality = 30 points
-            Freshness      = 20 points
-            Lifecycle      = 25 points
-
-        Total = 100 points
+        Evaluate FVG quality using only information available
+        at evaluation_index.
         """
 
         if not candles:
             raise ValueError(
                 "candles cannot be empty."
             )
-
-        updated = self.update_fvg_status(
-            fvg,
-            candles,
-        )
 
         creation_index = fvg[
             "created_at_index"
@@ -374,6 +361,25 @@ class FairValueGapEngine:
             raise ValueError(
                 "FVG creation index exceeds candle data."
             )
+
+        if evaluation_index is None:
+            evaluation_index = len(candles) - 1
+
+        if evaluation_index < creation_index:
+            raise ValueError(
+                "evaluation_index cannot be before FVG creation."
+            )
+
+        evaluation_index = min(
+            evaluation_index,
+            len(candles) - 1,
+        )
+
+        updated = self.update_fvg_status(
+            fvg,
+            candles,
+            evaluation_index,
+        )
 
         first = candles[
             fvg["first_candle_index"]
@@ -521,17 +527,11 @@ class FairValueGapEngine:
             "lifecycle_score": lifecycle_score,
         }
 
-        result["middle_candle_body_ratio"] = (
-            body_ratio
-        )
-
-        result["middle_candle_close_location"] = (
-            close_location
-        )
+        result["middle_candle_body_ratio"] = body_ratio
+        result["middle_candle_close_location"] = close_location
 
         result["eligible"] = (
-            total_score
-            >= self.min_quality_score
+            total_score >= self.min_quality_score
             and status != "invalidated"
             and fill < 0.90
         )
@@ -546,20 +546,30 @@ class FairValueGapEngine:
         self,
         fvgs: list[dict],
         candles: list[dict],
+        evaluation_index: int | None = None,
     ) -> list[dict]:
         """
-        Evaluate all FVGs and return only eligible FVGs.
+        Evaluate FVGs at a specific point in time.
 
-        This does NOT create trade signals.
+        If evaluation_index is omitted, the latest candle
+        is used.
         """
 
         quality_fvgs = []
 
         for fvg in fvgs:
 
+            if (
+                evaluation_index is not None
+                and fvg["created_at_index"]
+                > evaluation_index
+            ):
+                continue
+
             evaluated = self.evaluate_quality(
                 fvg,
                 candles,
+                evaluation_index,
             )
 
             if evaluated["eligible"]:

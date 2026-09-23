@@ -30,7 +30,8 @@ class MarketData:
 
     def get_ticker(self, symbol: str) -> dict:
         """
-        Get the current linear futures ticker.
+        Get the current linear futures ticker
+        for one symbol.
         """
 
         url = f"{self.BASE_URL}/v5/market/tickers"
@@ -63,3 +64,41 @@ class MarketData:
             )
 
         return result[0]
+
+    def get_tickers(self) -> list[dict]:
+        """
+        Get current linear futures tickers.
+
+        This retrieves the market ticker universe in
+        one request instead of requesting each symbol
+        individually.
+
+        Returns:
+            A list of ticker dictionaries from Bybit.
+        """
+
+        url = f"{self.BASE_URL}/v5/market/tickers"
+
+        params = {
+            "category": "linear",
+        }
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if data["retCode"] != 0:
+            raise RuntimeError(
+                f"Bybit API error: {data['retMsg']}"
+            )
+
+        return (
+            data.get("result", {})
+            .get("list", [])
+        )
