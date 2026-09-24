@@ -140,3 +140,68 @@ class PositionManager:
             "entry_price": entry_price,
             "unrealized_pnl": unrealized_pnl,
         }
+
+    def get_protection_state(self, symbol: str) -> dict:
+        """
+        Return the normalized TP/SL protection state reported by the
+        exchange for the active position.
+
+        This method is read-only. It never applies, modifies, or
+        removes protection.
+        """
+
+        if not symbol:
+            raise ValueError("Symbol is required.")
+
+        symbol = symbol.upper()
+        position = self.get_position(symbol)
+
+        if position is None:
+            return {
+                "symbol": symbol,
+                "has_position": False,
+                "has_stop_loss": False,
+                "has_take_profit": False,
+                "stop_loss": None,
+                "take_profit": None,
+            }
+
+        raw_stop_loss = position.get("stopLoss")
+        raw_take_profit = position.get("takeProfit")
+
+        def parse_optional_price(value, field_name):
+            if value in {None, ""}:
+                return None
+
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{field_name} must be numeric when provided."
+                )
+
+            if price <= 0:
+                raise ValueError(
+                    f"{field_name} must be greater than zero when provided."
+                )
+
+            return price
+
+        stop_loss = parse_optional_price(
+            raw_stop_loss,
+            "Stop loss",
+        )
+
+        take_profit = parse_optional_price(
+            raw_take_profit,
+            "Take profit",
+        )
+
+        return {
+            "symbol": symbol,
+            "has_position": True,
+            "has_stop_loss": stop_loss is not None,
+            "has_take_profit": take_profit is not None,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }

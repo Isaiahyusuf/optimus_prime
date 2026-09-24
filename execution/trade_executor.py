@@ -1,4 +1,6 @@
 from execution.order_state import OrderState
+from execution.protection_recovery import ProtectionRecovery
+from execution.protection_verifier import ProtectionVerifier
 from execution.trade_record import TradeRecord
 class TradeExecutor:
     """
@@ -20,6 +22,8 @@ class TradeExecutor:
         kill_switch=None,
         position_safety_monitor=None,
         order_state=None,
+        protection_verifier=None,
+        protection_recovery=None,
     ):
         self.exchange = exchange
         self.order_engine = order_engine
@@ -27,6 +31,24 @@ class TradeExecutor:
         self.kill_switch = kill_switch
         self.position_safety_monitor = position_safety_monitor
         self.order_state = order_state or OrderState()
+
+        if protection_verifier is not None:
+            self.protection_verifier = protection_verifier
+        elif self.position_manager is not None:
+            self.protection_verifier = ProtectionVerifier(
+                self.position_manager
+            )
+        else:
+            self.protection_verifier = None
+
+        if protection_recovery is not None:
+            self.protection_recovery = protection_recovery
+        elif self.position_manager is not None:
+            self.protection_recovery = ProtectionRecovery(
+                self.position_manager
+            )
+        else:
+            self.protection_recovery = None
 
     def create_trade_record(
         self,
@@ -468,11 +490,35 @@ class TradeExecutor:
                 "recovery_action=RETRY_PROTECTION"
             ) from exc
 
+        protection_verification = self.protection_verifier.verify(
+            symbol.upper(),
+            expected_stop_loss=float(protection["stopLoss"]),
+            expected_take_profit=float(protection["takeProfit"]),
+        )
+
+        if not protection_verification["safe"]:
+            trade_record.update_state("PROTECTION_FAILED")
+
+            recovery = self.protection_recovery.evaluate(
+                symbol.upper(),
+                expected_stop_loss=float(protection["stopLoss"]),
+                expected_take_profit=float(protection["takeProfit"]),
+            )
+
+            raise RuntimeError(
+                "POSITION_ACTIVE_UNPROTECTED: "
+                "TP/SL protection was applied but exchange verification "
+                f"failed: {protection_verification['status']}; "
+                f"recovery_action={recovery['action']}"
+            )
+
         return {
             "symbol": symbol.upper(),
             "entry": entry,
             "order_state": order_state,
             "verification": verification,
             "protection": protection_result,
+            "protection_verification": protection_verification,
             "trade_record": trade_record.snapshot(),
+            "status": "PROTECTED",
         }

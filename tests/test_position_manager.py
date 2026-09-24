@@ -245,3 +245,80 @@ def test_reconcile_position_rejects_negative_size():
         assert False, "Expected ValueError"
     except ValueError as exc:
         assert str(exc) == "Expected size cannot be negative."
+
+
+def test_get_protection_state_returns_unprotected_when_no_position():
+    exchange = FakeExchange(None)
+    manager = PositionManager(exchange)
+
+    result = manager.get_protection_state("BTCUSDT")
+
+    assert result == {
+        "symbol": "BTCUSDT",
+        "has_position": False,
+        "has_stop_loss": False,
+        "has_take_profit": False,
+        "stop_loss": None,
+        "take_profit": None,
+    }
+
+
+def test_get_protection_state_detects_tp_and_sl():
+    exchange = FakeExchange({
+        "symbol": "BTCUSDT",
+        "size": "0.003",
+        "side": "Buy",
+        "stopLoss": "99000",
+        "takeProfit": "105000",
+    })
+
+    manager = PositionManager(exchange)
+
+    result = manager.get_protection_state("BTCUSDT")
+
+    assert result == {
+        "symbol": "BTCUSDT",
+        "has_position": True,
+        "has_stop_loss": True,
+        "has_take_profit": True,
+        "stop_loss": 99000.0,
+        "take_profit": 105000.0,
+    }
+
+
+def test_get_protection_state_detects_missing_take_profit():
+    exchange = FakeExchange({
+        "symbol": "BTCUSDT",
+        "size": "0.003",
+        "side": "Buy",
+        "stopLoss": "99000",
+        "takeProfit": "",
+    })
+
+    manager = PositionManager(exchange)
+
+    result = manager.get_protection_state("BTCUSDT")
+
+    assert result["has_position"] is True
+    assert result["has_stop_loss"] is True
+    assert result["has_take_profit"] is False
+    assert result["stop_loss"] == 99000.0
+    assert result["take_profit"] is None
+
+
+def test_get_protection_state_rejects_malformed_stop_loss():
+    exchange = FakeExchange({
+        "symbol": "BTCUSDT",
+        "size": "0.003",
+        "side": "Buy",
+        "stopLoss": "invalid",
+        "takeProfit": "105000",
+    })
+
+    manager = PositionManager(exchange)
+
+    try:
+        manager.get_protection_state("BTCUSDT")
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "Stop loss must be numeric when provided."

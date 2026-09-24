@@ -750,6 +750,18 @@ def test_execute_trade_runs_entry_then_verification_then_protection():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_protection_state(self, symbol):
+            events.append("protection_verification")
+
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 86001.20,
+                "take_profit": 88555.60,
+            }
+
     executor = TradeExecutor(
         exchange=WorkflowExchange(),
         order_engine=WorkflowOrderEngine(),
@@ -782,6 +794,7 @@ def test_execute_trade_runs_entry_then_verification_then_protection():
         "verification",
         "prepare_protection",
         "protection",
+        "protection_verification",
     ]
 
 
@@ -1952,6 +1965,16 @@ def test_trade_executor_records_successful_trade_lifecycle():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 49000.0,
+                "take_profit": 52000.0,
+            }
+
     executor = TradeExecutor(
         exchange=FakeExchange(),
         order_engine=FakeOrderEngine(),
@@ -2051,6 +2074,373 @@ def test_trade_executor_records_protection_failure():
                 "actual_size": expected_size,
                 "actual_entry_price": 50000.0,
                 "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    with pytest.raises(RuntimeError, match="POSITION_ACTIVE_UNPROTECTED"):
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+            },
+        )
+
+
+def test_execute_trade_verifies_protection_after_application():
+    events = []
+
+    class ProtectionVerifiedExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-ORDER-PROTECTION-VERIFIED",
+                "orderStatus": "Filled",
+            }
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {
+                "retCode": 0,
+                "result": {
+                    "status": "OK",
+                },
+            }
+
+    class ProtectionVerifiedOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+
+            return {
+                "category": "linear",
+                "symbol": symbol,
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class ProtectionVerifiedPositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("verification")
+
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.003,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_verification")
+
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 86001.20,
+                "take_profit": 88555.60,
+            }
+
+    exchange = ProtectionVerifiedExchange()
+    position_manager = ProtectionVerifiedPositionManager(False)
+
+    executor = TradeExecutor(
+        exchange=exchange,
+        order_engine=ProtectionVerifiedOrderEngine(),
+        position_manager=position_manager,
+    )
+
+    trade_plan = {
+        "status": "GUARDIAN_APPROVED",
+        "direction": "long",
+        "position_size": "0.003",
+        "entry_price": "86854.137",
+        "stop_loss": "86001.234",
+        "take_profit": "88555.678",
+    }
+
+    result = executor.execute_trade(
+        "btcusdt",
+        trade_plan,
+    )
+
+    assert result["status"] == "PROTECTED"
+    assert result["protection_verification"]["status"] == "MATCH"
+    assert result["protection_verification"]["safe"] is True
+
+    assert events == [
+        "entry",
+        "order_state",
+        "verification",
+        "prepare_protection",
+        "protection",
+        "protection_verification",
+    ]
+
+
+def test_execute_trade_evaluates_protection_recovery_without_retry():
+    import pytest
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def get_open_orders(self, symbol):
+            return []
+
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol,
+                "side": "Buy",
+                "size": "0.001",
+                "avgPrice": "50000",
+                "unrealisedPnl": "0",
+            }
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {"orderId": "recovery-123"}
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+                "qty": "0.001",
+                "cumExecQty": "0.001",
+                "leavesQty": "0",
+                "avgPrice": "50000",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_order(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.001",
+                "price": "50000",
+            }
+
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def has_position(self, symbol):
+            return False
+
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+
+            return {
+                "symbol": symbol,
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.001,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_state")
+
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 48900.0,
+                "take_profit": 52000.0,
+            }
+
+    class FakeProtectionRecovery:
+        def evaluate(
+            self,
+            symbol,
+            expected_stop_loss,
+            expected_take_profit,
+        ):
+            events.append("recovery_evaluation")
+
+            return {
+                "symbol": symbol.upper(),
+                "status": "PROTECTION_MISMATCH",
+                "safe": False,
+                "recovery_required": True,
+                "action": "REAPPLY_PROTECTION",
+                "reason": "Exchange TP/SL does not match intended protection.",
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+        protection_recovery=FakeProtectionRecovery(),
+    )
+
+    with pytest.raises(RuntimeError, match="REAPPLY_PROTECTION"):
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+            },
+        )
+
+    assert events == [
+        "entry",
+        "order_state",
+        "position_verification",
+        "prepare_protection",
+        "protection",
+        "protection_state",
+        "recovery_evaluation",
+    ]
+
+    assert "protection" in events
+    assert events.count("protection") == 1
+
+
+def test_execute_trade_rejects_protection_mismatch_after_application():
+    import pytest
+    from execution.trade_executor import TradeExecutor
+
+    class FakeExchange:
+        def get_open_orders(self, symbol):
+            return []
+
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol,
+                "side": "Buy",
+                "size": "0.001",
+                "avgPrice": "50000",
+                "unrealisedPnl": "0",
+            }
+
+        def create_order(self, **kwargs):
+            return {"orderId": "mismatch-123"}
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+                "qty": "0.001",
+                "cumExecQty": "0.001",
+                "leavesQty": "0",
+                "avgPrice": "50000",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_order(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.001",
+                "price": "50000",
+            }
+
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def has_position(self, symbol):
+            return False
+
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol,
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 48900.0,
+                "take_profit": 52000.0,
             }
 
     executor = TradeExecutor(
