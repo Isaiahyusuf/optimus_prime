@@ -1735,3 +1735,334 @@ def test_execute_trade_stops_on_unknown_entry_state():
     assert result["order_state"]["state"] == "UNKNOWN"
     assert result["status"] == "ENTRY_STATE_UNKNOWN"
     assert events == ["entry", "order_state"]
+
+def test_get_entry_order_state_includes_execution_data():
+    class ExecutionDataExchange:
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "PartiallyFilled",
+                "qty": "0.003",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+
+    executor = TradeExecutor(
+        exchange=ExecutionDataExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.get_entry_order_state(
+        "BTCUSDT",
+        "TEST-EXECUTION-001",
+    )
+
+    assert result["state"] == "PARTIALLY_FILLED"
+    assert result["execution"] == {
+        "order_quantity": 0.003,
+        "filled_quantity": 0.001,
+        "remaining_quantity": 0.002,
+        "average_fill_price": 86854.10,
+    }
+
+
+def test_trade_executor_can_create_trade_record():
+    from execution.trade_record import TradeRecord
+
+    record = TradeRecord(
+        symbol="BTCUSDT",
+        order_id="test-order-123",
+    )
+
+    assert isinstance(record, TradeRecord)
+    assert record.symbol == "BTCUSDT"
+    assert record.order_id == "test-order-123"
+    assert record.state == "CREATED"
+
+
+def test_trade_executor_create_trade_record():
+    from execution.trade_executor import TradeExecutor
+    from execution.trade_record import TradeRecord
+
+    executor = TradeExecutor(
+        exchange=None,
+        order_engine=None,
+        position_manager=None,
+    )
+
+    record = executor.create_trade_record(
+        "btcusdt",
+        order_id="test-order-456",
+    )
+
+    assert isinstance(record, TradeRecord)
+    assert record.symbol == "BTCUSDT"
+    assert record.order_id == "test-order-456"
+    assert record.state == "CREATED"
+
+
+def test_trade_executor_records_pending_entry_state():
+    from execution.trade_executor import TradeExecutor
+
+    class FakeExchange:
+        def get_open_orders(self, symbol):
+            return []
+
+        def get_position(self, symbol):
+            return None
+
+        def create_order(self, **kwargs):
+            return {"orderId": "pending-123"}
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "New",
+            }
+
+    class FakeOrderEngine:
+        def prepare_order(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.001",
+                "price": "50000",
+            }
+
+    class FakePositionManager:
+        def has_position(self, symbol):
+            return False
+
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol,
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": None,
+                "actual_size": 0.0,
+                "actual_entry_price": 0.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.execute_trade(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+    )
+
+    assert result["status"] == "ENTRY_PENDING"
+    assert result["trade_record"]["symbol"] == "BTCUSDT"
+    assert result["trade_record"]["order_id"] == "pending-123"
+    assert result["trade_record"]["state"] == "ENTRY_PENDING"
+
+
+def test_trade_executor_records_successful_trade_lifecycle():
+    from execution.trade_executor import TradeExecutor
+
+    class FakeExchange:
+        def get_open_orders(self, symbol):
+            return []
+
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol,
+                "side": "Buy",
+                "size": "0.001",
+                "avgPrice": "50000",
+                "unrealisedPnl": "0",
+            }
+
+        def create_order(self, **kwargs):
+            return {"orderId": "filled-123"}
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+                "qty": "0.001",
+                "cumExecQty": "0.001",
+                "leavesQty": "0",
+                "avgPrice": "50000",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_order(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.001",
+                "price": "50000",
+            }
+
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def has_position(self, symbol):
+            return False
+
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol,
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.execute_trade(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+    )
+
+    record = result["trade_record"]
+
+    assert record["symbol"] == "BTCUSDT"
+    assert record["order_id"] == "filled-123"
+    assert record["state"] == "PROTECTION_APPLIED"
+    assert record["order_quantity"] == 0.001
+    assert record["filled_quantity"] == 0.001
+    assert record["remaining_quantity"] == 0.0
+    assert record["average_fill_price"] == 50000.0
+
+
+def test_trade_executor_records_protection_failure():
+    import pytest
+    from execution.trade_executor import TradeExecutor
+
+    class FakeExchange:
+        def get_open_orders(self, symbol):
+            return []
+
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol,
+                "side": "Buy",
+                "size": "0.001",
+                "avgPrice": "50000",
+                "unrealisedPnl": "0",
+            }
+
+        def create_order(self, **kwargs):
+            return {"orderId": "protection-fail-123"}
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+                "qty": "0.001",
+                "cumExecQty": "0.001",
+                "leavesQty": "0",
+                "avgPrice": "50000",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            raise RuntimeError("simulated TP/SL failure")
+
+    class FakeOrderEngine:
+        def prepare_order(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.001",
+                "price": "50000",
+            }
+
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def has_position(self, symbol):
+            return False
+
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol,
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    with pytest.raises(RuntimeError, match="POSITION_ACTIVE_UNPROTECTED"):
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+            },
+        )

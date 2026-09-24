@@ -1,4 +1,5 @@
 from execution.order_state import OrderState
+from execution.trade_record import TradeRecord
 class TradeExecutor:
     """
     Executes Guardian-approved trade plans.
@@ -26,6 +27,23 @@ class TradeExecutor:
         self.kill_switch = kill_switch
         self.position_safety_monitor = position_safety_monitor
         self.order_state = order_state or OrderState()
+
+    def create_trade_record(
+        self,
+        symbol: str,
+        order_id: str | None = None,
+    ) -> TradeRecord:
+        """
+        Create a lifecycle record for one trade attempt.
+        """
+
+        if not symbol:
+            raise ValueError("Symbol is required.")
+
+        return TradeRecord(
+            symbol=symbol.upper(),
+            order_id=order_id,
+        )
 
     def prepare_trade(self, symbol: str, trade_plan: dict) -> dict:
         """
@@ -177,12 +195,29 @@ class TradeExecutor:
                 "order": None,
             }
 
-        return {
+        execution = None
+
+        execution_fields = {
+            "qty",
+            "cumExecQty",
+            "leavesQty",
+            "avgPrice",
+        }
+
+        if execution_fields.issubset(order):
+            execution = self.order_state.get_execution_data(order)
+
+        result = {
             "order_id": order_id,
             "raw_status": order.get("orderStatus"),
             "state": self.order_state.interpret(order),
             "order": order,
         }
+
+        if execution is not None:
+            result["execution"] = execution
+
+        return result
 
     def verify_position(
         self,
@@ -320,6 +355,10 @@ class TradeExecutor:
             trade_plan,
         )
 
+        trade_record = self.create_trade_record(
+            symbol.upper(),
+        )
+
         entry = self.exchange.create_order(
             symbol=prepared_order["symbol"],
             side=prepared_order["side"],
@@ -329,6 +368,10 @@ class TradeExecutor:
         )
 
         order_id = entry.get("orderId")
+
+        if order_id:
+            trade_record.order_id = order_id
+            trade_record.update_state("ENTRY_SUBMITTED")
 
         if not order_id:
             raise RuntimeError(
@@ -340,6 +383,32 @@ class TradeExecutor:
             symbol,
             order_id,
         )
+
+        state_mapping = {
+            "PENDING": "ENTRY_PENDING",
+            "PARTIALLY_FILLED": "ENTRY_PARTIALLY_FILLED",
+            "FILLED": "ENTRY_FILLED",
+            "CANCELLED": "ENTRY_CANCELLED",
+            "REJECTED": "ENTRY_REJECTED",
+            "UNKNOWN": "ENTRY_STATE_UNKNOWN",
+        }
+
+        trade_record.update_state(
+            state_mapping.get(
+                order_state["state"],
+                "ENTRY_STATE_UNKNOWN",
+            )
+        )
+
+        execution = order_state.get("execution")
+
+        if execution is not None:
+            trade_record.update_execution(
+                order_quantity=execution["order_quantity"],
+                filled_quantity=execution["filled_quantity"],
+                remaining_quantity=execution["remaining_quantity"],
+                average_fill_price=execution["average_fill_price"],
+            )
 
         if order_state["state"] != "FILLED":
             status_map = {
@@ -354,6 +423,7 @@ class TradeExecutor:
                 "symbol": symbol.upper(),
                 "entry": entry,
                 "order_state": order_state,
+                "trade_record": trade_record.snapshot(),
                 "status": status_map.get(
                     order_state["state"],
                     "ENTRY_STATE_UNKNOWN",
@@ -386,7 +456,11 @@ class TradeExecutor:
                 sl_trigger_by=protection["slTriggerBy"],
                 tp_trigger_by=protection["tpTriggerBy"],
             )
+
+            trade_record.update_state("PROTECTION_APPLIED")
         except Exception as exc:
+            trade_record.update_state("PROTECTION_FAILED")
+
             raise RuntimeError(
                 "POSITION_ACTIVE_UNPROTECTED: "
                 "entry position was verified, but TP/SL protection "
@@ -400,4 +474,5 @@ class TradeExecutor:
             "order_state": order_state,
             "verification": verification,
             "protection": protection_result,
+            "trade_record": trade_record.snapshot(),
         }

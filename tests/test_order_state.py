@@ -45,3 +45,108 @@ def test_non_dictionary_order_is_rejected():
 
     with pytest.raises(ValueError, match="Order must be a dictionary"):
         state.interpret(None)
+
+def test_get_execution_data_returns_order_quantities():
+    order_state = OrderState()
+
+    result = order_state.get_execution_data(
+        {
+            "qty": "0.003",
+            "cumExecQty": "0.001",
+            "leavesQty": "0.002",
+            "avgPrice": "86854.10",
+        }
+    )
+
+    assert result == {
+        "order_quantity": 0.003,
+        "filled_quantity": 0.001,
+        "remaining_quantity": 0.002,
+        "average_fill_price": 86854.10,
+    }
+
+def test_get_execution_data_rejects_missing_quantity():
+    order_state = OrderState()
+
+    with pytest.raises(ValueError, match="Order quantity is required"):
+        order_state.get_execution_data(
+            {
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
+
+
+def test_get_execution_data_rejects_non_numeric_values():
+    order_state = OrderState()
+
+    with pytest.raises(ValueError, match="Order quantity must be numeric"):
+        order_state.get_execution_data(
+            {
+                "qty": "invalid",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
+
+
+def test_get_execution_data_rejects_negative_values():
+    order_state = OrderState()
+
+    with pytest.raises(
+        ValueError,
+        match="Cumulative executed quantity cannot be negative",
+    ):
+        order_state.get_execution_data(
+            {
+                "qty": "0.003",
+                "cumExecQty": "-0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
+
+def test_get_execution_data_rejects_missing_quantity():
+    order_state = OrderState()
+
+    with pytest.raises(ValueError, match="Order quantity is required"):
+        order_state.get_execution_data(
+            {
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
+
+
+def test_get_execution_data_rejects_non_numeric_values():
+    order_state = OrderState()
+
+    with pytest.raises(ValueError, match="Order quantity must be numeric"):
+        order_state.get_execution_data(
+            {
+                "qty": "invalid",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
+
+
+def test_get_execution_data_rejects_negative_values():
+    order_state = OrderState()
+
+    with pytest.raises(
+        ValueError,
+        match="Cumulative executed quantity cannot be negative",
+    ):
+        order_state.get_execution_data(
+            {
+                "qty": "0.003",
+                "cumExecQty": "-0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+        )
