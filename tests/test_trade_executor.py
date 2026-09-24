@@ -2331,7 +2331,10 @@ def test_execute_trade_evaluates_protection_recovery_without_retry():
         protection_recovery=FakeProtectionRecovery(),
     )
 
-    with pytest.raises(RuntimeError, match="REAPPLY_PROTECTION"):
+    with pytest.raises(
+        RuntimeError,
+        match="recovery_status=RECOVERY_FAILED",
+    ):
         executor.execute_trade(
             "BTCUSDT",
             {
@@ -2347,10 +2350,13 @@ def test_execute_trade_evaluates_protection_recovery_without_retry():
         "protection",
         "protection_state",
         "recovery_evaluation",
+        "position_verification",
+        "prepare_protection",
+        "protection",
+        "protection_state",
     ]
 
-    assert "protection" in events
-    assert events.count("protection") == 1
+    assert events.count("protection") == 2
 
 
 def test_execute_trade_rejects_protection_mismatch_after_application():
@@ -2456,3 +2462,316 @@ def test_execute_trade_rejects_protection_mismatch_after_application():
                 "status": "GUARDIAN_APPROVED",
             },
         )
+
+
+def test_recover_protection_succeeds_after_reapplication():
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_state")
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 49000.0,
+                "take_profit": 52000.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.recover_protection(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+        {
+            "side": "Buy",
+            "qty": "0.001",
+            "price": "50000",
+        },
+    )
+
+    assert result["status"] == "PROTECTED"
+    assert result["protection_verification"]["safe"] is True
+    assert events == [
+        "position_verification",
+        "prepare_protection",
+        "protection",
+        "protection_state",
+    ]
+
+
+def test_recover_protection_blocks_when_position_verification_fails():
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+            return {
+                "symbol": symbol.upper(),
+                "status": "POSITION_MISMATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Sell",
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.recover_protection(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+        {
+            "side": "Buy",
+            "qty": "0.001",
+            "price": "50000",
+        },
+    )
+
+    assert result["status"] == "RECOVERY_FAILED"
+    assert "POSITION_MISMATCH" in result["reason"]
+    assert events == [
+        "position_verification",
+    ]
+
+
+def test_recover_protection_handles_reapplication_failure():
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            raise RuntimeError("Bybit protection request failed")
+
+    class FakeOrderEngine:
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.recover_protection(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+        {
+            "side": "Buy",
+            "qty": "0.001",
+            "price": "50000",
+        },
+    )
+
+    assert result["status"] == "RECOVERY_FAILED"
+    assert "Protection reapplication failed" in result["reason"]
+    assert events == [
+        "position_verification",
+        "prepare_protection",
+        "protection",
+    ]
+
+
+def test_recover_protection_fails_when_protection_remains_mismatched():
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {
+                "retCode": 0,
+                "result": {},
+            }
+
+    class FakeOrderEngine:
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_state")
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 48900.0,
+                "take_profit": 52000.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.recover_protection(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+        },
+        {
+            "side": "Buy",
+            "qty": "0.001",
+            "price": "50000",
+        },
+    )
+
+    assert result["status"] == "RECOVERY_FAILED"
+    assert "PROTECTION_MISMATCH" in result["reason"]
+    assert result["protection_verification"]["safe"] is False
+
+    assert events == [
+        "position_verification",
+        "prepare_protection",
+        "protection",
+        "protection_state",
+    ]

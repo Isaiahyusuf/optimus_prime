@@ -346,6 +346,100 @@ class TradeExecutor:
             tp_trigger_by=protection["tpTriggerBy"],
         )
 
+    def recover_protection(
+        self,
+        symbol: str,
+        trade_plan: dict,
+        expected_order: dict,
+    ) -> dict:
+        """
+        Perform one controlled TP/SL recovery attempt.
+
+        Recovery is allowed only after the position is re-verified.
+        This method performs exactly one protection application and
+        then verifies the exchange-reported protection.
+
+        It never loops or performs unlimited retries.
+        """
+
+        if not symbol:
+            raise ValueError("Symbol is required.")
+
+        if not isinstance(trade_plan, dict):
+            raise ValueError("Trade plan must be a dictionary.")
+
+        if not isinstance(expected_order, dict):
+            raise ValueError("Expected order must be a dictionary.")
+
+        symbol = symbol.upper()
+
+        verification = self.verify_position(
+            symbol,
+            expected_order,
+        )
+
+        if verification["status"] != "MATCH":
+            return {
+                "symbol": symbol,
+                "status": "RECOVERY_FAILED",
+                "reason": (
+                    "Position verification failed during protection recovery: "
+                    f"{verification['status']}"
+                ),
+                "verification": verification,
+            }
+
+        protection = self.order_engine.prepare_protection_orders(
+            symbol,
+            trade_plan,
+        )
+
+        try:
+            protection_result = self.exchange.set_trading_stop(
+                symbol=protection["symbol"],
+                stop_loss=protection["stopLoss"],
+                take_profit=protection["takeProfit"],
+                position_idx=protection["positionIdx"],
+                tpsl_mode=protection["tpslMode"],
+                sl_trigger_by=protection["slTriggerBy"],
+                tp_trigger_by=protection["tpTriggerBy"],
+            )
+        except Exception as exc:
+            return {
+                "symbol": symbol,
+                "status": "RECOVERY_FAILED",
+                "reason": f"Protection reapplication failed: {exc}",
+                "verification": verification,
+            }
+
+        protection_verification = self.protection_verifier.verify(
+            symbol,
+            expected_stop_loss=float(protection["stopLoss"]),
+            expected_take_profit=float(protection["takeProfit"]),
+        )
+
+        if not protection_verification["safe"]:
+            return {
+                "symbol": symbol,
+                "status": "RECOVERY_FAILED",
+                "reason": (
+                    "Protection remained unsafe after the recovery attempt: "
+                    f"{protection_verification['status']}"
+                ),
+                "verification": verification,
+                "protection": protection_result,
+                "protection_verification": protection_verification,
+            }
+
+        return {
+            "symbol": symbol,
+            "status": "PROTECTED",
+            "reason": "Protection recovery succeeded.",
+            "verification": verification,
+            "protection": protection_result,
+            "protection_verification": protection_verification,
+        }
+
     def execute_trade(
         self,
         symbol: str,
@@ -504,6 +598,38 @@ class TradeExecutor:
                 expected_stop_loss=float(protection["stopLoss"]),
                 expected_take_profit=float(protection["takeProfit"]),
             )
+
+            if recovery["action"] == "REAPPLY_PROTECTION":
+                recovery_result = self.recover_protection(
+                    symbol.upper(),
+                    trade_plan,
+                    prepared_order,
+                )
+
+                if recovery_result["status"] == "PROTECTED":
+                    trade_record.update_state("PROTECTION_APPLIED")
+
+                    return {
+                        "symbol": symbol.upper(),
+                        "entry": entry,
+                        "order_state": order_state,
+                        "verification": verification,
+                        "protection": recovery_result["protection"],
+                        "protection_verification": (
+                            recovery_result["protection_verification"]
+                        ),
+                        "recovery": recovery_result,
+                        "trade_record": trade_record.snapshot(),
+                        "status": "PROTECTED",
+                    }
+
+                raise RuntimeError(
+                    "POSITION_ACTIVE_UNPROTECTED: "
+                    "TP/SL protection remained unsafe after one "
+                    "controlled recovery attempt; "
+                    f"recovery_status={recovery_result['status']}; "
+                    f"recovery_reason={recovery_result['reason']}"
+                )
 
             raise RuntimeError(
                 "POSITION_ACTIVE_UNPROTECTED: "
