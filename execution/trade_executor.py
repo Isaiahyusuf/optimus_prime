@@ -1,4 +1,5 @@
 from execution.order_state import OrderState
+from execution.order_lifecycle import OrderLifecycle
 from execution.protection_recovery import ProtectionRecovery
 from execution.protection_verifier import ProtectionVerifier
 from execution.trade_record import TradeRecord
@@ -31,6 +32,7 @@ class TradeExecutor:
         self.kill_switch = kill_switch
         self.position_safety_monitor = position_safety_monitor
         self.order_state = order_state or OrderState()
+        self.order_lifecycle = OrderLifecycle(self.order_state)
 
         if protection_verifier is not None:
             self.protection_verifier = protection_verifier
@@ -217,17 +219,7 @@ class TradeExecutor:
                 "order": None,
             }
 
-        execution = None
-
-        execution_fields = {
-            "qty",
-            "cumExecQty",
-            "leavesQty",
-            "avgPrice",
-        }
-
-        if execution_fields.issubset(order):
-            execution = self.order_state.get_execution_data(order)
+        lifecycle = self.order_lifecycle.interpret_with_execution(order)
 
         result = {
             "order_id": order_id,
@@ -236,8 +228,8 @@ class TradeExecutor:
             "order": order,
         }
 
-        if execution is not None:
-            result["execution"] = execution
+        if lifecycle["execution"] is not None:
+            result["execution"] = lifecycle["execution"]
 
         return result
 
@@ -500,19 +492,9 @@ class TradeExecutor:
             order_id,
         )
 
-        state_mapping = {
-            "PENDING": "ENTRY_PENDING",
-            "PARTIALLY_FILLED": "ENTRY_PARTIALLY_FILLED",
-            "FILLED": "ENTRY_FILLED",
-            "CANCELLED": "ENTRY_CANCELLED",
-            "REJECTED": "ENTRY_REJECTED",
-            "UNKNOWN": "ENTRY_STATE_UNKNOWN",
-        }
-
         trade_record.update_state(
-            state_mapping.get(
-                order_state["state"],
-                "ENTRY_STATE_UNKNOWN",
+            self.order_lifecycle.interpret(
+                order_state["order"]
             )
         )
 
