@@ -560,13 +560,73 @@ class TradeExecutor:
 
             trade_record.update_state("PROTECTION_APPLIED")
         except Exception as exc:
+            protection_verification = self.protection_verifier.verify(
+                symbol.upper(),
+                expected_stop_loss=float(protection["stopLoss"]),
+                expected_take_profit=float(protection["takeProfit"]),
+            )
+
+            if protection_verification["safe"]:
+                trade_record.update_state("PROTECTION_APPLIED")
+
+                return {
+                    "symbol": symbol.upper(),
+                    "entry": entry,
+                    "order_state": order_state,
+                    "verification": verification,
+                    "protection": None,
+                    "protection_verification": protection_verification,
+                    "trade_record": trade_record.snapshot(),
+                    "status": "PROTECTED",
+                }
+
             trade_record.update_state("PROTECTION_FAILED")
+
+            recovery = self.protection_recovery.evaluate(
+                symbol.upper(),
+                expected_stop_loss=float(protection["stopLoss"]),
+                expected_take_profit=float(protection["takeProfit"]),
+            )
+
+            if recovery["action"] == "REAPPLY_PROTECTION":
+                recovery_result = self.recover_protection(
+                    symbol.upper(),
+                    trade_plan,
+                    prepared_order,
+                )
+
+                if recovery_result["status"] == "PROTECTED":
+                    trade_record.update_state("PROTECTION_APPLIED")
+
+                    return {
+                        "symbol": symbol.upper(),
+                        "entry": entry,
+                        "order_state": order_state,
+                        "verification": verification,
+                        "protection": recovery_result["protection"],
+                        "protection_verification": (
+                            recovery_result["protection_verification"]
+                        ),
+                        "recovery": recovery_result,
+                        "trade_record": trade_record.snapshot(),
+                        "status": "PROTECTED",
+                    }
+
+                raise RuntimeError(
+                    "POSITION_ACTIVE_UNPROTECTED: "
+                    "TP/SL protection remained unsafe after one "
+                    "controlled recovery attempt; "
+                    f"recovery_status={recovery_result['status']}; "
+                    f"recovery_reason={recovery_result['reason']}"
+                )
 
             raise RuntimeError(
                 "POSITION_ACTIVE_UNPROTECTED: "
-                "entry position was verified, but TP/SL protection "
-                f"could not be applied: {exc}; "
-                "recovery_action=RETRY_PROTECTION"
+                "protection application raised an exception and "
+                "exchange verification remained unsafe: "
+                f"{protection_verification['status']}; "
+                f"recovery_action={recovery['action']}; "
+                f"application_error={exc}"
             ) from exc
 
         protection_verification = self.protection_verifier.verify(

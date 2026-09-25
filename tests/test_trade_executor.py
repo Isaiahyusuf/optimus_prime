@@ -1118,6 +1118,25 @@ def test_execute_trade_reports_protection_failure_after_verified_fill():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "size": "0.003",
+                "avgPrice": "86854.10",
+                "unrealisedPnl": "0",
+            }
+
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": False,
+                "has_take_profit": False,
+                "stop_loss": None,
+                "take_profit": None,
+            }
+
     executor = TradeExecutor(
         exchange=ProtectionFailureExchange(),
         order_engine=ProtectionFailureOrderEngine(),
@@ -1147,6 +1166,9 @@ def test_execute_trade_reports_protection_failure_after_verified_fill():
 
     assert events == [
         "entry",
+        "verification",
+        "prepare_protection",
+        "protection",
         "verification",
         "prepare_protection",
         "protection",
@@ -1272,6 +1294,25 @@ def test_execute_trade_marks_verified_position_unprotected_when_protection_fails
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "size": "0.003",
+                "avgPrice": "86854.10",
+                "unrealisedPnl": "0",
+            }
+
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": False,
+                "has_take_profit": False,
+                "stop_loss": None,
+                "take_profit": None,
+            }
+
     executor = TradeExecutor(
         exchange=UnprotectedExchange(),
         order_engine=UnprotectedOrderEngine(),
@@ -1353,6 +1394,25 @@ def test_protection_failure_returns_retry_protection_recovery_action():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "size": "0.003",
+                "avgPrice": "86854.10",
+                "unrealisedPnl": "0",
+            }
+
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": False,
+                "has_take_profit": False,
+                "stop_loss": None,
+                "take_profit": None,
+            }
+
     executor = TradeExecutor(
         exchange=RecoveryExchange(),
         order_engine=RecoveryOrderEngine(),
@@ -1377,7 +1437,7 @@ def test_protection_failure_returns_retry_protection_recovery_action():
         message = str(exc)
 
         assert "POSITION_ACTIVE_UNPROTECTED" in message
-        assert "RETRY_PROTECTION" in message
+        assert "recovery_status=RECOVERY_FAILED" in message
     else:
         raise AssertionError(
             "Protection failure must produce a recovery action."
@@ -2251,6 +2311,16 @@ def test_trade_executor_records_protection_failure():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": False,
+                "has_take_profit": False,
+                "stop_loss": None,
+                "take_profit": None,
+            }
+
     executor = TradeExecutor(
         exchange=FakeExchange(),
         order_engine=FakeOrderEngine(),
@@ -2950,3 +3020,113 @@ def test_recover_protection_fails_when_protection_remains_mismatched():
         "protection",
         "protection_state",
     ]
+
+
+def test_execute_trade_rechecks_protection_after_application_exception():
+    class AmbiguousProtectionExchange:
+        def __init__(self):
+            self.protection_calls = 0
+
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            return {
+                "orderId": "TEST-AMBIGUOUS-PROTECTION",
+                "orderStatus": "Filled",
+            }
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+            }
+
+        def get_position(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "side": "Buy",
+                "size": "0.003",
+                "avgPrice": "86854.10",
+                "unrealisedPnl": "0",
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            self.protection_calls += 1
+            raise RuntimeError(
+                "Protection request response was lost."
+            )
+
+    class AmbiguousProtectionOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class AmbiguousProtectionPositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.003,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_position(self, symbol):
+            return exchange.get_position(symbol)
+
+        def get_protection_state(self, symbol):
+            position = self.get_position(symbol)
+
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": position["stopLoss"] is not None,
+                "has_take_profit": position["takeProfit"] is not None,
+                "stop_loss": float(position["stopLoss"]),
+                "take_profit": float(position["takeProfit"]),
+            }
+
+    exchange = AmbiguousProtectionExchange()
+
+    executor = TradeExecutor(
+        exchange=exchange,
+        order_engine=AmbiguousProtectionOrderEngine(),
+        position_manager=AmbiguousProtectionPositionManager(False),
+    )
+
+    trade_plan = {
+        "status": "GUARDIAN_APPROVED",
+        "direction": "long",
+        "position_size": "0.003",
+        "entry_price": "86854.137",
+        "stop_loss": "86001.234",
+        "take_profit": "88555.678",
+    }
+
+    result = executor.execute_trade(
+        "btcusdt",
+        trade_plan,
+    )
+
+    assert result["status"] == "PROTECTED"
+    assert result["protection_verification"]["status"] == "MATCH"
+    assert exchange.protection_calls == 1
