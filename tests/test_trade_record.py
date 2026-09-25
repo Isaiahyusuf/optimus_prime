@@ -92,3 +92,14 @@ def test_trade_record_accepts_position_verification_failed_state():
     )
 
     assert record.state == "POSITION_VERIFICATION_FAILED"
+
+
+def test_trade_record_accepts_entry_cancellation_failed_state():
+    record = TradeRecord(
+        symbol="BTCUSDT",
+        order_id="TEST-CANCEL-FAIL",
+    )
+
+    record.update_state("ENTRY_CANCELLATION_FAILED")
+
+    assert record.snapshot()["state"] == "ENTRY_CANCELLATION_FAILED"

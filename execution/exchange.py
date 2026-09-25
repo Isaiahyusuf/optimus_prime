@@ -246,6 +246,32 @@ class BybitExchange:
             body,
         )
 
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: str,
+    ) -> dict:
+        """
+        Cancel an existing linear order on Bybit.
+        """
+
+        if not symbol:
+            raise ValueError("Symbol is required.")
+
+        if not order_id:
+            raise ValueError("Order ID is required.")
+
+        body = {
+            "category": "linear",
+            "symbol": symbol.upper(),
+            "orderId": order_id,
+        }
+
+        return self._authenticated_post(
+            "/v5/order/cancel",
+            body,
+        )
+
     def set_trading_stop(
         self,
         symbol: str,

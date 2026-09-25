@@ -763,3 +763,60 @@ def test_get_order_returns_none_when_order_is_missing():
     result = exchange.get_order("BTCUSDT", "MISSING-ORDER")
 
     assert result is None
+def test_cancel_order_builds_expected_payload(monkeypatch):
+    exchange = BybitExchange()
+
+    captured = {}
+
+    def fake_authenticated_post(path, body):
+        captured["path"] = path
+        captured["body"] = body
+        return {"retCode": 0}
+
+    monkeypatch.setattr(
+        exchange,
+        "_authenticated_post",
+        fake_authenticated_post,
+    )
+
+    result = exchange.cancel_order(
+        symbol="btcusdt",
+        order_id="ORDER-123",
+    )
+
+    assert result == {"retCode": 0}
+
+    assert captured["path"] == "/v5/order/cancel"
+
+    assert captured["body"] == {
+        "category": "linear",
+        "symbol": "BTCUSDT",
+        "orderId": "ORDER-123",
+    }
+
+def test_cancel_order_requires_symbol():
+    exchange = BybitExchange()
+
+    try:
+        exchange.cancel_order(
+            symbol="",
+            order_id="ORDER-123",
+        )
+    except ValueError as exc:
+        assert str(exc) == "Symbol is required."
+    else:
+        raise AssertionError("Expected missing symbol to be rejected.")
+
+
+def test_cancel_order_requires_order_id():
+    exchange = BybitExchange()
+
+    try:
+        exchange.cancel_order(
+            symbol="BTCUSDT",
+            order_id="",
+        )
+    except ValueError as exc:
+        assert str(exc) == "Order ID is required."
+    else:
+        raise AssertionError("Expected missing order ID to be rejected.")

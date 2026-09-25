@@ -17,6 +17,7 @@ class TradeRecord:
         "PROTECTION_APPLIED",
         "PROTECTION_FAILED",
         "ENTRY_CANCELLED",
+        "ENTRY_CANCELLATION_FAILED",
         "ENTRY_REJECTED",
         "ENTRY_STATE_UNKNOWN",
     }

@@ -1822,6 +1822,13 @@ def test_execute_trade_stops_on_partially_filled_entry():
                 "orderStatus": "PartiallyFilled",
             }
 
+        def cancel_order(self, symbol, order_id):
+            events.append("cancel")
+            return {
+                "retCode": 0,
+                "orderId": order_id,
+            }
+
     class PartialPositionManager(FakePositionManager):
         def reconcile_position(self, *args, **kwargs):
             events.append("verification")
@@ -1847,7 +1854,7 @@ def test_execute_trade_stops_on_partially_filled_entry():
 
     assert result["order_state"]["state"] == "PARTIALLY_FILLED"
     assert result["status"] == "ENTRY_PARTIALLY_FILLED"
-    assert events == ["entry", "order_state"]
+    assert events == ["entry", "order_state", "cancel"]
 
 
 def test_execute_trade_stops_on_cancelled_entry():
@@ -3133,3 +3140,54 @@ def test_execute_trade_rechecks_protection_after_application_exception():
     assert result["status"] == "PROTECTED"
     assert result["protection_verification"]["status"] == "MATCH"
     assert exchange.protection_calls == 1
+
+
+def test_execute_trade_reports_partial_fill_cancellation_failure():
+    class PartialCancelFailureExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            return {
+                "orderId": "TEST-PARTIAL-CANCEL-FAIL",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "PartiallyFilled",
+            }
+
+        def cancel_order(self, symbol, order_id):
+            raise RuntimeError("Cancellation failed")
+
+    executor = TradeExecutor(
+        exchange=PartialCancelFailureExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(False),
+    )
+
+    trade_plan = {
+        "status": "GUARDIAN_APPROVED",
+        "direction": "long",
+        "position_size": "0.003",
+        "entry_price": "86854.137",
+        "stop_loss": "86001.234",
+        "take_profit": "88555.678",
+    }
+
+    try:
+        executor.execute_trade(
+            "BTCUSDT",
+            trade_plan,
+        )
+    except RuntimeError as exc:
+        assert "Partial entry cancellation failed" in str(exc)
+        assert executor.last_trade_record.snapshot()["state"] == (
+            "ENTRY_CANCELLATION_FAILED"
+        )
+    else:
+        raise AssertionError(
+            "Partial-fill cancellation failure must not be silently accepted."
+        )

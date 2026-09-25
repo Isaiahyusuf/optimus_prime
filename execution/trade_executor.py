@@ -520,6 +520,20 @@ class TradeExecutor:
                 "UNKNOWN": "ENTRY_STATE_UNKNOWN",
             }
 
+            if order_state["state"] == "PARTIALLY_FILLED":
+                try:
+                    self.exchange.cancel_order(
+                        symbol.upper(),
+                        order_id,
+                    )
+                except Exception as exc:
+                    trade_record.update_state(
+                        "ENTRY_CANCELLATION_FAILED"
+                    )
+                    raise RuntimeError(
+                        "Partial entry cancellation failed"
+                    ) from exc
+
             return {
                 "symbol": symbol.upper(),
                 "entry": entry,
