@@ -31,6 +31,7 @@ class TradeExecutor:
         self.position_manager = position_manager
         self.kill_switch = kill_switch
         self.position_safety_monitor = position_safety_monitor
+        self.last_trade_record = None
         self.order_state = order_state or OrderState()
         self.order_lifecycle = OrderLifecycle(self.order_state)
 
@@ -64,10 +65,12 @@ class TradeExecutor:
         if not symbol:
             raise ValueError("Symbol is required.")
 
-        return TradeRecord(
+        record = TradeRecord(
             symbol=symbol.upper(),
             order_id=order_id,
         )
+        self.last_trade_record = record
+        return record
 
     def prepare_trade(self, symbol: str, trade_plan: dict) -> dict:
         """

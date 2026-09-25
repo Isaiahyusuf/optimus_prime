@@ -882,6 +882,9 @@ def test_execute_trade_does_not_apply_protection_when_position_is_missing():
         "entry",
         "verification",
     ]
+    assert executor.last_trade_record.state == (
+        "POSITION_VERIFICATION_FAILED"
+    )
 
 
 def test_execute_trade_does_not_apply_protection_when_position_mismatches():
