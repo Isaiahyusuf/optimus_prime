@@ -103,7 +103,7 @@ def test_get_position_state_returns_empty_state_without_position():
     }
 
 
-def test_get_position_state_handles_malformed_numeric_values():
+def test_get_position_state_rejects_malformed_numeric_values():
     position = {
         "symbol": "BTCUSDT",
         "size": "invalid",
@@ -115,16 +115,11 @@ def test_get_position_state_handles_malformed_numeric_values():
     exchange = FakeExchange(position)
     manager = PositionManager(exchange)
 
-    result = manager.get_position_state("BTCUSDT")
-
-    assert result == {
-        "symbol": "BTCUSDT",
-        "has_position": False,
-        "side": "Buy",
-        "size": 0.0,
-        "entry_price": 0.0,
-        "unrealized_pnl": 0.0,
-    }
+    try:
+        manager.get_position_state("BTCUSDT")
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "Position size must be numeric."
 
 
 def test_reconcile_position_matches_when_both_have_no_position():
@@ -322,3 +317,60 @@ def test_get_protection_state_rejects_malformed_stop_loss():
         assert False, "Expected ValueError"
     except ValueError as exc:
         assert str(exc) == "Stop loss must be numeric when provided."
+
+
+def test_get_position_state_rejects_malformed_position_size():
+    position = {
+        "symbol": "BTCUSDT",
+        "size": "invalid",
+        "side": "Buy",
+        "avgPrice": "100000",
+        "unrealisedPnl": "0",
+    }
+
+    exchange = FakeExchange(position)
+    manager = PositionManager(exchange)
+
+    try:
+        manager.get_position_state("BTCUSDT")
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "Position size must be numeric."
+
+
+def test_get_position_state_rejects_malformed_entry_price():
+    position = {
+        "symbol": "BTCUSDT",
+        "size": "0.003",
+        "side": "Buy",
+        "avgPrice": "invalid",
+        "unrealisedPnl": "0",
+    }
+
+    exchange = FakeExchange(position)
+    manager = PositionManager(exchange)
+
+    try:
+        manager.get_position_state("BTCUSDT")
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "Entry price must be numeric."
+
+
+def test_get_position_state_rejects_malformed_unrealized_pnl():
+    position = {
+        "symbol": "BTCUSDT",
+        "size": "0.003",
+        "side": "Buy",
+        "avgPrice": "100000",
+        "unrealisedPnl": "invalid",
+    }
+
+    exchange = FakeExchange(position)
+    manager = PositionManager(exchange)
+
+    try:
+        manager.get_position_state("BTCUSDT")
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert str(exc) == "Unrealized PnL must be numeric."

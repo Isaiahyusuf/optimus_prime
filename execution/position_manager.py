@@ -120,17 +120,23 @@ class PositionManager:
         try:
             size = float(raw_size)
         except (TypeError, ValueError):
-            size = 0.0
+            raise ValueError(
+                "Position size must be numeric."
+            )
 
         try:
             entry_price = float(raw_entry_price)
         except (TypeError, ValueError):
-            entry_price = 0.0
+            raise ValueError(
+                "Entry price must be numeric."
+            )
 
         try:
             unrealized_pnl = float(raw_unrealized_pnl)
         except (TypeError, ValueError):
-            unrealized_pnl = 0.0
+            raise ValueError(
+                "Unrealized PnL must be numeric."
+            )
 
         return {
             "symbol": symbol.upper(),
