@@ -884,6 +884,181 @@ def test_execute_trade_does_not_apply_protection_when_position_is_missing():
     ]
 
 
+def test_execute_trade_does_not_apply_protection_when_position_mismatches():
+    events = []
+
+    class MismatchExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-ORDER-MISMATCH",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": "TEST-ORDER-MISMATCH",
+                "orderStatus": "Filled",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            raise AssertionError(
+                "Protection must not be applied to a mismatched position."
+            )
+
+    class MismatchOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            raise AssertionError(
+                "Protection must not even be prepared for a mismatched position."
+            )
+
+    class MismatchPositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("verification")
+
+            return {
+                "symbol": symbol.upper(),
+                "status": "POSITION_MISMATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Sell",
+                "actual_size": 0.003,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=MismatchExchange(),
+        order_engine=MismatchOrderEngine(),
+        position_manager=MismatchPositionManager(False),
+    )
+
+    trade_plan = {
+        "status": "GUARDIAN_APPROVED",
+        "direction": "long",
+        "position_size": "0.003",
+        "entry_price": "86854.137",
+        "stop_loss": "86001.234",
+        "take_profit": "88555.678",
+    }
+
+    try:
+        executor.execute_trade(
+            "btcusdt",
+            trade_plan,
+        )
+    except RuntimeError as exc:
+        assert "Position verification failed" in str(exc)
+    else:
+        raise AssertionError(
+            "execute_trade() must reject a mismatched position."
+        )
+
+    assert events == [
+        "entry",
+        "verification",
+    ]
+
+
+def test_execute_trade_records_position_verification_failure():
+    class VerificationFailureExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            return {
+                "orderId": "TEST-ORDER-VERIFICATION-FAIL",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            raise AssertionError(
+                "Protection must not be applied after failed position verification."
+            )
+
+    class VerificationFailureOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            raise AssertionError(
+                "Protection must not be prepared after failed position verification."
+            )
+
+    class VerificationFailurePositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol.upper(),
+                "status": "SIZE_MISMATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.002,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    class RecordingTradeExecutor(TradeExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.record = None
+
+        def create_trade_record(self, symbol, order_id=None):
+            self.record = super().create_trade_record(
+                symbol,
+                order_id,
+            )
+            return self.record
+
+    executor = RecordingTradeExecutor(
+        exchange=VerificationFailureExchange(),
+        order_engine=VerificationFailureOrderEngine(),
+        position_manager=VerificationFailurePositionManager(False),
+    )
+
+    trade_plan = {
+        "status": "GUARDIAN_APPROVED",
+        "direction": "long",
+        "position_size": "0.003",
+        "entry_price": "86854.137",
+        "stop_loss": "86001.234",
+        "take_profit": "88555.678",
+    }
+
+    try:
+        executor.execute_trade(
+            "btcusdt",
+            trade_plan,
+        )
+    except RuntimeError as exc:
+        assert "Position verification failed" in str(exc)
+    else:
+        raise AssertionError(
+            "execute_trade() must reject failed position verification."
+        )
+
+    assert executor.record is not None
+    assert executor.record.state == "POSITION_VERIFICATION_FAILED"
+
+
 def test_execute_trade_reports_protection_failure_after_verified_fill():
     events = []
 

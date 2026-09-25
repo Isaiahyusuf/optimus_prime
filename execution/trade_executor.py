@@ -534,6 +534,9 @@ class TradeExecutor:
         )
 
         if verification["status"] != "MATCH":
+            trade_record.update_state(
+                "POSITION_VERIFICATION_FAILED"
+            )
             raise RuntimeError(
                 "Position verification failed: "
                 f"{verification['status']}"

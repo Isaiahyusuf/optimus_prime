@@ -83,3 +83,12 @@ def test_trade_record_rejects_invalid_initial_state():
             "BTCUSDT",
             state="INVALID",
         )
+
+
+def test_trade_record_accepts_position_verification_failed_state():
+    record = TradeRecord(
+        "BTCUSDT",
+        state="POSITION_VERIFICATION_FAILED",
+    )
+
+    assert record.state == "POSITION_VERIFICATION_FAILED"
