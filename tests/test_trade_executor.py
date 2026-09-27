@@ -1840,6 +1840,135 @@ def test_execute_trade_stops_on_partially_filled_entry():
         position_manager=PartialPositionManager(False),
     )
 
+    try:
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+                "direction": "long",
+                "position_size": "0.003",
+                "entry_price": "86854.137",
+                "stop_loss": "86001.234",
+                "take_profit": "88555.678",
+            },
+        )
+    except RuntimeError as exc:
+        assert (
+            "Partial entry execution data is required"
+            in str(exc)
+        )
+        assert (
+            executor.last_trade_record.snapshot()["state"]
+            == "ENTRY_PARTIALLY_FILLED"
+        )
+    else:
+        raise AssertionError(
+            "Missing partial-fill execution data must fail safely."
+        )
+
+    assert events == ["entry", "order_state", "cancel"]
+
+
+
+def test_execute_trade_detects_residual_position_after_partial_fill():
+    events = []
+
+    class PartialExposureExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-PARTIAL-EXPOSURE-001",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": order_id,
+                "orderStatus": "PartiallyFilled",
+                "qty": "0.003",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+
+        def cancel_order(self, symbol, order_id):
+            events.append("cancel")
+            return {
+                "retCode": 0,
+                "orderId": order_id,
+            }
+
+        def get_position(self, symbol):
+            events.append("position")
+            return {
+                "symbol": symbol,
+                "side": "Buy",
+                "size": "0.001",
+                "avgPrice": "86854.10",
+                "unrealisedPnl": "0",
+            }
+
+    class PartialExposureOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol,
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class PartialExposurePositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("verification")
+
+            assert expected_side == "Buy"
+            assert expected_size == 0.001
+
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.001,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 86001.20,
+                "take_profit": 88555.60,
+            }
+
+    class PartialExposureProtectedExchange(PartialExposureExchange):
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {"retCode": 0}
+
+    executor = TradeExecutor(
+        exchange=PartialExposureProtectedExchange(),
+        order_engine=PartialExposureOrderEngine(),
+        position_manager=PartialExposurePositionManager(False),
+    )
+
     result = executor.execute_trade(
         "BTCUSDT",
         {
@@ -1852,9 +1981,20 @@ def test_execute_trade_stops_on_partially_filled_entry():
         },
     )
 
-    assert result["order_state"]["state"] == "PARTIALLY_FILLED"
-    assert result["status"] == "ENTRY_PARTIALLY_FILLED"
-    assert events == ["entry", "order_state", "cancel"]
+    assert events == [
+        "entry",
+        "order_state",
+        "cancel",
+        "verification",
+        "verification",
+        "protection",
+    ]
+    assert result["status"] == "ENTRY_PARTIALLY_FILLED_PROTECTED"
+    assert result["trade_record"]["filled_quantity"] == 0.001
+    assert result["trade_record"]["remaining_quantity"] == 0.002
+    assert result["trade_record"]["state"] == "PROTECTION_APPLIED"
+    assert result["protection_verification"]["safe"] is True
+    assert result["protection"] == {"retCode": 0}
 
 
 def test_execute_trade_stops_on_cancelled_entry():
@@ -3191,3 +3331,114 @@ def test_execute_trade_reports_partial_fill_cancellation_failure():
         raise AssertionError(
             "Partial-fill cancellation failure must not be silently accepted."
         )
+
+
+def test_execute_trade_fails_safe_when_partial_fill_protection_fails():
+    events = []
+
+    class PartialExposureExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-PARTIAL-PROTECTION-FAIL-001",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": order_id,
+                "orderStatus": "PartiallyFilled",
+                "qty": "0.003",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+
+        def cancel_order(self, symbol, order_id):
+            events.append("cancel")
+            return {
+                "retCode": 0,
+                "orderId": order_id,
+            }
+
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            raise RuntimeError("Protection application failed")
+
+    class PartialExposureOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol,
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class PartialExposurePositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("verification")
+
+            assert expected_side == "Buy"
+            assert expected_size == 0.001
+
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.001,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+    executor = TradeExecutor(
+        exchange=PartialExposureExchange(),
+        order_engine=PartialExposureOrderEngine(),
+        position_manager=PartialExposurePositionManager(False),
+    )
+
+    try:
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+                "direction": "long",
+                "position_size": "0.003",
+                "entry_price": "86854.137",
+                "stop_loss": "86001.234",
+                "take_profit": "88555.678",
+            },
+        )
+    except RuntimeError as exc:
+        assert "POSITION_ACTIVE_UNPROTECTED" in str(exc)
+        assert (
+            executor.last_trade_record.snapshot()["state"]
+            == "PROTECTION_FAILED"
+        )
+    else:
+        raise AssertionError(
+            "Partial-fill protection failure must not be silently accepted."
+        )
+
+    assert events == [
+        "entry",
+        "order_state",
+        "cancel",
+        "verification",
+        "verification",
+        "protection",
+    ]

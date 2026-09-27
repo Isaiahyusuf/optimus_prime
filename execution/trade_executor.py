@@ -534,6 +534,64 @@ class TradeExecutor:
                         "Partial entry cancellation failed"
                     ) from exc
 
+                if execution is None:
+                    raise RuntimeError(
+                        "Partial entry execution data is required "
+                        "to reconcile residual exposure."
+                    )
+
+                filled_quantity = execution["filled_quantity"]
+
+                partial_expected_order = dict(prepared_order)
+                partial_expected_order["qty"] = filled_quantity
+
+                verification = self.position_manager.reconcile_position(
+                    symbol.upper(),
+                    expected_side=partial_expected_order["side"],
+                    expected_size=filled_quantity,
+                )
+
+                if verification["status"] != "MATCH":
+                    trade_record.update_state(
+                        "POSITION_VERIFICATION_FAILED"
+                    )
+                    raise RuntimeError(
+                        "Partial-fill position verification failed: "
+                        f"{verification['status']}"
+                    )
+
+                recovery_result = self.recover_protection(
+                    symbol.upper(),
+                    trade_plan,
+                    partial_expected_order,
+                )
+
+                if recovery_result["status"] != "PROTECTED":
+                    trade_record.update_state("PROTECTION_FAILED")
+                    raise RuntimeError(
+                        "POSITION_ACTIVE_UNPROTECTED: "
+                        "partial-fill residual position remained unsafe "
+                        "after one controlled protection attempt; "
+                        f"recovery_status={recovery_result['status']}; "
+                        f"recovery_reason={recovery_result['reason']}"
+                    )
+
+                trade_record.update_state("PROTECTION_APPLIED")
+
+                return {
+                    "symbol": symbol.upper(),
+                    "entry": entry,
+                    "order_state": order_state,
+                    "verification": verification,
+                    "protection": recovery_result["protection"],
+                    "protection_verification": (
+                        recovery_result["protection_verification"]
+                    ),
+                    "recovery": recovery_result,
+                    "trade_record": trade_record.snapshot(),
+                    "status": "ENTRY_PARTIALLY_FILLED_PROTECTED",
+                }
+
             return {
                 "symbol": symbol.upper(),
                 "entry": entry,
