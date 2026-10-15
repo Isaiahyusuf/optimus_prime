@@ -400,11 +400,46 @@ class TradeExecutor:
                 tp_trigger_by=protection["tpTriggerBy"],
             )
         except Exception as exc:
+            try:
+                protection_verification = self.protection_verifier.verify(
+                    symbol,
+                    expected_stop_loss=float(protection["stopLoss"]),
+                    expected_take_profit=float(protection["takeProfit"]),
+                )
+            except Exception as verify_exc:
+                return {
+                    "symbol": symbol,
+                    "status": "RECOVERY_FAILED",
+                    "reason": (
+                        "Protection reapplication failed: "
+                        f"{exc}; protection verification also failed: "
+                        f"{verify_exc}"
+                    ),
+                    "verification": verification,
+                }
+
+            if protection_verification.get("safe") is True:
+                return {
+                    "symbol": symbol,
+                    "status": "PROTECTED",
+                    "reason": (
+                        "Protection verified after the reapplication "
+                        f"request raised an exception: {exc}"
+                    ),
+                    "verification": verification,
+                    "protection_verification": protection_verification,
+                }
+
             return {
                 "symbol": symbol,
                 "status": "RECOVERY_FAILED",
-                "reason": f"Protection reapplication failed: {exc}",
+                "reason": (
+                    "Protection reapplication failed: "
+                    f"{exc}; verified protection is unsafe: "
+                    f"{protection_verification.get('status', 'UNKNOWN')}"
+                ),
                 "verification": verification,
+                "protection_verification": protection_verification,
             }
 
         protection_verification = self.protection_verifier.verify(

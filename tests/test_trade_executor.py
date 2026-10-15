@@ -3154,6 +3154,17 @@ def test_recover_protection_handles_reapplication_failure():
                 "actual_unrealized_pnl": 0.0,
             }
 
+        def get_protection_state(self, symbol):
+            events.append("protection_state")
+            return {
+                "symbol": symbol.upper(),
+                "has_position": True,
+                "has_stop_loss": True,
+                "has_take_profit": True,
+                "stop_loss": 49000.0,
+                "take_profit": 52000.0,
+            }
+
     executor = TradeExecutor(
         exchange=FakeExchange(),
         order_engine=FakeOrderEngine(),
@@ -3162,24 +3173,18 @@ def test_recover_protection_handles_reapplication_failure():
 
     result = executor.recover_protection(
         "BTCUSDT",
-        {
-            "status": "GUARDIAN_APPROVED",
-        },
-        {
-            "side": "Buy",
-            "qty": "0.001",
-            "price": "50000",
-        },
+        {"status": "GUARDIAN_APPROVED"},
+        {"side": "Buy", "qty": "0.001", "price": "50000"},
     )
 
-    assert result["status"] == "RECOVERY_FAILED"
-    assert "Protection reapplication failed" in result["reason"]
+    assert result["status"] == "PROTECTED"
+    assert result["protection_verification"]["safe"] is True
     assert events == [
         "position_verification",
         "prepare_protection",
         "protection",
+        "protection_state",
     ]
-
 
 def test_recover_protection_fails_when_protection_remains_mismatched():
     from execution.trade_executor import TradeExecutor
