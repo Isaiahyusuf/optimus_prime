@@ -761,11 +761,21 @@ class TradeExecutor:
                 f"application_error={exc}"
             ) from exc
 
-        protection_verification = self.protection_verifier.verify(
-            symbol.upper(),
-            expected_stop_loss=float(protection["stopLoss"]),
-            expected_take_profit=float(protection["takeProfit"]),
-        )
+        try:
+            protection_verification = self.protection_verifier.verify(
+                symbol.upper(),
+                expected_stop_loss=float(protection["stopLoss"]),
+                expected_take_profit=float(protection["takeProfit"]),
+            )
+        except Exception as exc:
+            trade_record.update_state("PROTECTION_FAILED")
+            raise RuntimeError(
+                "POSITION_ACTIVE_UNPROTECTED: "
+                "TP/SL application returned successfully, but exchange "
+                "protection verification raised an exception; "
+                "protection state is unknown: "
+                f"{exc}"
+            ) from exc
 
         if not protection_verification["safe"]:
             trade_record.update_state("PROTECTION_FAILED")

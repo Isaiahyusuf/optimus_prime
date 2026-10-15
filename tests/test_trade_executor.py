@@ -2696,6 +2696,91 @@ def test_execute_trade_verifies_protection_after_application():
     ]
 
 
+def test_execute_trade_handles_protection_verification_exception():
+    import pytest
+
+    events = []
+
+    class VerificationFailureExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-VERIFY-EXCEPTION",
+                "orderStatus": "Filled",
+            }
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": order_id,
+                "orderStatus": "Filled",
+            }
+
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {"retCode": 0}
+
+    class VerificationFailureOrderEngine(FakeOrderEngine):
+        def prepare_protection_orders(self, symbol, trade_plan):
+            return {
+                "category": "linear",
+                "symbol": symbol,
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "86001.20",
+                "takeProfit": "88555.60",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class VerificationFailurePositionManager(FakePositionManager):
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": "Buy",
+                "actual_size": 0.003,
+                "actual_entry_price": 86854.10,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_verification")
+            raise RuntimeError("simulated protection read failure")
+
+    executor = TradeExecutor(
+        exchange=VerificationFailureExchange(),
+        order_engine=VerificationFailureOrderEngine(),
+        position_manager=VerificationFailurePositionManager(False),
+    )
+
+    with pytest.raises(RuntimeError, match="POSITION_ACTIVE_UNPROTECTED"):
+        executor.execute_trade(
+            "BTCUSDT",
+            {
+                "status": "GUARDIAN_APPROVED",
+                "direction": "long",
+                "position_size": "0.003",
+                "entry_price": "86854.137",
+                "stop_loss": "86001.234",
+                "take_profit": "88555.678",
+            },
+        )
+
+    assert events.count("protection") == 1
+    assert events.count("protection_verification") == 1
+
+
 def test_execute_trade_evaluates_protection_recovery_without_retry():
     import pytest
     from execution.trade_executor import TradeExecutor
