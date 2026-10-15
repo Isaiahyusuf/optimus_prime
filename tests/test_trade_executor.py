@@ -1934,6 +1934,18 @@ def test_execute_trade_detects_residual_position_after_partial_fill():
         ):
             events.append("verification")
 
+            if expected_size == 0.0:
+                return {
+                    "symbol": symbol.upper(),
+                    "status": "UNEXPECTED_POSITION",
+                    "expected_side": expected_side,
+                    "expected_size": 0.0,
+                    "actual_side": "Buy",
+                    "actual_size": 0.001,
+                    "actual_entry_price": 86854.10,
+                    "actual_unrealized_pnl": 0.0,
+                }
+
             assert expected_side == "Buy"
             assert expected_size == 0.001
 
@@ -1987,6 +1999,7 @@ def test_execute_trade_detects_residual_position_after_partial_fill():
         "cancel",
         "verification",
         "verification",
+        "verification",
         "protection",
     ]
     assert result["status"] == "ENTRY_PARTIALLY_FILLED_PROTECTED"
@@ -1996,6 +2009,89 @@ def test_execute_trade_detects_residual_position_after_partial_fill():
     assert result["protection_verification"]["safe"] is True
     assert result["protection"] == {"retCode": 0}
 
+
+
+def test_execute_trade_returns_flat_after_partial_fill():
+    events = []
+
+    class FlatPartialExchange:
+        def get_open_orders(self, symbol=None):
+            return []
+
+        def create_order(self, **kwargs):
+            events.append("entry")
+            return {
+                "orderId": "TEST-PARTIAL-FLAT-001",
+                "orderStatus": "New",
+            }
+
+        def get_order(self, symbol, order_id):
+            events.append("order_state")
+            return {
+                "orderId": "TEST-PARTIAL-FLAT-001",
+                "orderStatus": "PartiallyFilled",
+                "qty": "0.003",
+                "cumExecQty": "0.001",
+                "leavesQty": "0.002",
+                "avgPrice": "86854.10",
+            }
+
+        def cancel_order(self, symbol, order_id):
+            events.append("cancel")
+            return {"retCode": 0}
+
+        def set_trading_stop(self, **kwargs):
+            raise AssertionError(
+                "Protection must not be applied when the position is flat."
+            )
+
+    class FlatPartialPositionManager(FakePositionManager):
+        def reconcile_position(
+            self, symbol, expected_side=None, expected_size=0.0
+        ):
+            events.append("verification")
+            assert expected_size == 0.0, (
+                "The executor should first check whether the position is flat."
+            )
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": 0.0,
+                "actual_side": None,
+                "actual_size": 0.0,
+                "actual_entry_price": 0.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            raise AssertionError(
+                "Protection must not be checked for a nonexistent position."
+            )
+
+    executor = TradeExecutor(
+        exchange=FlatPartialExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FlatPartialPositionManager(False),
+    )
+
+    result = executor.execute_trade(
+        "BTCUSDT",
+        {
+            "status": "GUARDIAN_APPROVED",
+            "direction": "long",
+            "position_size": "0.003",
+            "entry_price": "86854.137",
+            "stop_loss": "86001.234",
+            "take_profit": "88555.678",
+        },
+    )
+
+    assert events == ["entry", "order_state", "cancel", "verification"]
+    assert result["status"] == "ENTRY_PARTIALLY_FILLED_FLAT"
+    assert result["trade_record"]["filled_quantity"] == 0.001
+    assert result["trade_record"]["remaining_quantity"] == 0.002
+    assert result["trade_record"]["state"] == "ENTRY_PARTIALLY_FILLED_FLAT"
 
 def test_execute_trade_stops_on_cancelled_entry():
     events = []
@@ -3391,6 +3487,18 @@ def test_execute_trade_fails_safe_when_partial_fill_protection_fails():
         ):
             events.append("verification")
 
+            if expected_size == 0.0:
+                return {
+                    "symbol": symbol.upper(),
+                    "status": "UNEXPECTED_POSITION",
+                    "expected_side": expected_side,
+                    "expected_size": 0.0,
+                    "actual_side": "Buy",
+                    "actual_size": 0.001,
+                    "actual_entry_price": 86854.10,
+                    "actual_unrealized_pnl": 0.0,
+                }
+
             assert expected_side == "Buy"
             assert expected_size == 0.001
 
@@ -3438,6 +3546,7 @@ def test_execute_trade_fails_safe_when_partial_fill_protection_fails():
         "entry",
         "order_state",
         "cancel",
+        "verification",
         "verification",
         "verification",
         "protection",

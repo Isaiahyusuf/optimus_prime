@@ -540,6 +540,28 @@ class TradeExecutor:
                         "to reconcile residual exposure."
                     )
 
+                flat_verification = self.position_manager.reconcile_position(
+                    symbol.upper(),
+                    expected_size=0.0,
+                )
+
+                if (
+                    flat_verification.get("status") == "MATCH"
+                    and flat_verification.get("actual_size") == 0.0
+                    and flat_verification.get("actual_side") is None
+                ):
+                    trade_record.update_state(
+                        "ENTRY_PARTIALLY_FILLED_FLAT"
+                    )
+                    return {
+                        "symbol": symbol.upper(),
+                        "entry": entry,
+                        "order_state": order_state,
+                        "verification": flat_verification,
+                        "trade_record": trade_record.snapshot(),
+                        "status": "ENTRY_PARTIALLY_FILLED_FLAT",
+                    }
+
                 filled_quantity = execution["filled_quantity"]
 
                 partial_expected_order = dict(prepared_order)

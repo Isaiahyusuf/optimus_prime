@@ -11,6 +11,7 @@ class TradeRecord:
         "ENTRY_SUBMITTED",
         "ENTRY_PENDING",
         "ENTRY_PARTIALLY_FILLED",
+        "ENTRY_PARTIALLY_FILLED_FLAT",
         "ENTRY_FILLED",
         "POSITION_VERIFICATION_FAILED",
         "POSITION_VERIFIED",
