@@ -442,11 +442,24 @@ class TradeExecutor:
                 "protection_verification": protection_verification,
             }
 
-        protection_verification = self.protection_verifier.verify(
-            symbol,
-            expected_stop_loss=float(protection["stopLoss"]),
-            expected_take_profit=float(protection["takeProfit"]),
-        )
+        try:
+            protection_verification = self.protection_verifier.verify(
+                symbol,
+                expected_stop_loss=float(protection["stopLoss"]),
+                expected_take_profit=float(protection["takeProfit"]),
+            )
+        except Exception as exc:
+            return {
+                "symbol": symbol,
+                "status": "RECOVERY_FAILED",
+                "reason": (
+                    "Protection application returned successfully, but "
+                    "verification failed; protection state is unknown: "
+                    f"{exc}"
+                ),
+                "verification": verification,
+                "protection": protection_result,
+            }
 
         if not protection_verification["safe"]:
             return {

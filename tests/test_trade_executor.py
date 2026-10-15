@@ -3641,3 +3641,72 @@ def test_execute_trade_fails_safe_when_partial_fill_protection_fails():
         "verification",
         "protection",
     ]
+
+
+def test_recover_protection_handles_verification_exception_after_application():
+    from execution.trade_executor import TradeExecutor
+
+    events = []
+
+    class FakeExchange:
+        def set_trading_stop(self, **kwargs):
+            events.append("protection")
+            return {"retCode": 0, "result": {}}
+
+    class FakeOrderEngine:
+        def prepare_protection_orders(self, symbol, trade_plan):
+            events.append("prepare_protection")
+            return {
+                "category": "linear",
+                "symbol": symbol.upper(),
+                "tpslMode": "Full",
+                "positionIdx": 0,
+                "stopLoss": "49000",
+                "takeProfit": "52000",
+                "slTriggerBy": "MarkPrice",
+                "tpTriggerBy": "MarkPrice",
+            }
+
+    class FakePositionManager:
+        def reconcile_position(
+            self,
+            symbol,
+            expected_side=None,
+            expected_size=0.0,
+        ):
+            events.append("position_verification")
+            return {
+                "symbol": symbol.upper(),
+                "status": "MATCH",
+                "expected_side": expected_side,
+                "expected_size": expected_size,
+                "actual_side": expected_side,
+                "actual_size": expected_size,
+                "actual_entry_price": 50000.0,
+                "actual_unrealized_pnl": 0.0,
+            }
+
+        def get_protection_state(self, symbol):
+            events.append("protection_state")
+            raise RuntimeError("simulated protection read failure")
+
+    executor = TradeExecutor(
+        exchange=FakeExchange(),
+        order_engine=FakeOrderEngine(),
+        position_manager=FakePositionManager(),
+    )
+
+    result = executor.recover_protection(
+        "BTCUSDT",
+        {"status": "GUARDIAN_APPROVED"},
+        {"side": "Buy", "qty": "0.001", "price": "50000"},
+    )
+
+    assert result["status"] == "RECOVERY_FAILED"
+    assert "simulated protection read failure" in result["reason"]
+    assert events == [
+        "position_verification",
+        "prepare_protection",
+        "protection",
+        "protection_state",
+    ]
